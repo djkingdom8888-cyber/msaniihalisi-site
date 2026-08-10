@@ -1,0 +1,8 @@
+backend/venv/
+__pycache__/
+*.pyc
+.DS_Store
+msaniihalisi.db
+backend/INITIAL_ADMIN_CREDENTIALS.txt
+videos/
+audio/
