@@ -269,10 +269,34 @@ def list_tracks():
 @login_required
 def delete_track(track_id):
     conn = get_db()
+    row = conn.execute("SELECT src FROM tracks WHERE id = ?", (track_id,)).fetchone()
     conn.execute("UPDATE tracks SET active = 0 WHERE id = ?", (track_id,))
     conn.commit()
     conn.close()
+    # Uploaded videos are stored under unique-per-upload filenames, so it's safe to
+    # remove the file from disk once its track is delisted — nothing else references it.
+    # (Soft-delete only flips `active`; without this the persistent disk fills up with
+    # orphaned video files from every replaced/removed upload.)
+    if row and row["src"] and row["src"].startswith("videos/"):
+        _delete_video_file_if_unreferenced(row["src"])
     return jsonify({"ok": True})
+
+
+def _delete_video_file_if_unreferenced(src):
+    conn = get_db()
+    still_used = conn.execute(
+        "SELECT COUNT(*) FROM tracks WHERE src = ? AND active = 1", (src,)
+    ).fetchone()[0]
+    conn.close()
+    if still_used:
+        return
+    filename = src.split("/", 1)[-1]
+    path = VIDEOS_DIR / filename
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
 
 
 @app.post("/api/tracks")
@@ -333,7 +357,15 @@ def upload_track():
     base_name = secure_filename(file.filename.rsplit(".", 1)[0]) or "video"
     filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
     dest = VIDEOS_DIR / filename
-    file.save(dest)
+    try:
+        file.save(dest)
+    except OSError as e:
+        # e.g. errno 28 "No space left on device" if the persistent disk is full.
+        dest.unlink(missing_ok=True)
+        return jsonify({
+            "error": "Upload failed: the server ran out of storage space. "
+                     "An admin needs to free up disk space (delete old videos) or increase the disk size."
+        }), 507
 
     seconds = _video_duration_seconds(dest)
     title = (request.form.get("title") or base_name.replace("-", " ").replace("_", " ").title()).strip()
@@ -390,6 +422,39 @@ def disk_report():
         "video_dir_total_mb": round(total_bytes / 1024 / 1024, 2),
         "tracks": [dict(r) for r in rows],
         "files": files,
+    })
+
+
+@app.post("/api/admin/cleanup-orphaned-videos")
+@login_required
+def cleanup_orphaned_videos():
+    """Free disk space by deleting video files that no *active* track references —
+    i.e. files left behind by past uploads that were later replaced/delisted (soft
+    delete never removed the file) or that never finished being recorded in the DB.
+    Never touches a file referenced by a currently-active track."""
+    conn = get_db()
+    rows = conn.execute("SELECT src FROM tracks WHERE active = 1 AND src IS NOT NULL").fetchall()
+    conn.close()
+    active_files = {r["src"].split("/", 1)[-1] for r in rows if r["src"] and r["src"].startswith("videos/")}
+
+    deleted = []
+    freed_bytes = 0
+    if VIDEOS_DIR.exists():
+        for p in VIDEOS_DIR.iterdir():
+            if not p.is_file() or p.name in active_files:
+                continue
+            size = p.stat().st_size
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            deleted.append(p.name)
+            freed_bytes += size
+
+    return jsonify({
+        "ok": True,
+        "deleted_files": deleted,
+        "freed_mb": round(freed_bytes / 1024 / 1024, 2),
     })
 
 
