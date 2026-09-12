@@ -331,6 +331,28 @@
   .player-list .del-track:hover{border-color:var(--brass); color:var(--brass); background:rgba(184,73,46,0.1);}
   .music-section.admin-mode .player-list .del-track{display:flex;}
 
+  /* Halisi Live — live-now banner + admin "go live" panel */
+  .live-banner{
+    background:var(--rust); color:var(--bone); padding:14px 20px; display:flex;
+    align-items:center; justify-content:space-between; gap:14px; margin-bottom:24px; flex-wrap:wrap;
+  }
+  .live-banner .dot{width:8px; height:8px; border-radius:50%; background:var(--bone); display:inline-block; margin-right:8px; animation:pulse 1.4s infinite;}
+  .live-banner a.btn{padding:8px 16px; font-size:11px; background:var(--ink); border-color:var(--ink);}
+  .live-admin-panel{display:none; background:#24201A; border:1px solid #362F24; padding:18px 20px; margin-bottom:24px;}
+  .music-section.admin-mode .live-admin-panel{display:block;}
+  .live-admin-panel h4{font-family:'Inter'; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; color:var(--brass); margin-bottom:12px;}
+  .live-admin-form{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;}
+  .live-admin-form input{flex:1; min-width:160px; background:#1A1410; border:1px solid #4A4030; color:var(--bone); padding:10px 12px; font-size:12px; font-family:'Inter';}
+  .live-session-row{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid #2A251C; font-size:12.5px; flex-wrap:wrap;}
+  .live-session-row:last-child{border-bottom:none;}
+  .live-session-row .status-pill{font-size:9px; font-weight:800; letter-spacing:1px; text-transform:uppercase; padding:3px 8px; border-radius:2px;}
+  .live-session-row .status-pill.live{background:var(--rust); color:var(--bone);}
+  .live-session-row .status-pill.scheduled{border:1px solid #4A4030; color:#B3A186;}
+  .live-session-row .status-pill.ended{background:#4A4030; color:#B3A186;}
+  .live-session-row .links a{color:var(--brass); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-left:12px;}
+  .live-session-row .links a:hover{color:var(--bone);}
+  .live-empty{color:#8A7B63; font-size:12px;}
+
   .admin-toggle{
     background:transparent; border:1px solid #9C8B72; color:#B3A186; font-size:11px; font-weight:700;
     letter-spacing:1px; padding:7px 12px; cursor:pointer; text-transform:uppercase; border-radius:2px; transition:0.2s;
@@ -441,6 +463,7 @@
           <li><a href="#shop">Shop</a></li>
           <li><a href="#custom">Customize</a></li>
           <li><a href="#music">Music</a></li>
+          <li><a href="/live">Live</a></li>
           <li><a href="#about">Our Story</a></li>
         </ul>
       </nav>
@@ -507,8 +530,23 @@
         <h2>Halisi Sound — Music &amp; Videos</h2>
         <div style="display:flex; align-items:center; gap:18px;">
           <button id="adminToggle" class="admin-toggle" type="button">🔒 ADMIN MODE</button>
-          <a href="#" class="view-all">View All →</a>
+          <a href="/live" class="view-all">View All →</a>
         </div>
+      </div>
+
+      <div id="liveBanner" class="live-banner" style="display:none;">
+        <span><span class="dot"></span> <strong id="liveBannerTitle"></strong> — live now</span>
+        <a id="liveBannerLink" href="#" class="btn" target="_blank" rel="noopener">Join the Room</a>
+      </div>
+
+      <div class="live-admin-panel" id="liveAdminPanel">
+        <h4>Halisi Live — Go Live</h4>
+        <div class="live-admin-form">
+          <input type="text" id="liveTitleInput" placeholder="Session title (e.g. Sunday Frequency Check-In)">
+          <input type="text" id="liveHostInput" placeholder="Host name (optional)">
+          <button id="liveCreateBtn" class="btn btn-red" type="button">Create &amp; Go Live</button>
+        </div>
+        <div id="liveSessionsList"><p class="live-empty">No live sessions yet.</p></div>
       </div>
 
       <div class="music-layout">
@@ -671,6 +709,14 @@
   const uploadTitle  = document.getElementById('uploadTitle');
   const uploadArtist = document.getElementById('uploadArtist');
   const uploadBtn    = document.getElementById('uploadBtn');
+
+  const liveBanner = document.getElementById('liveBanner');
+  const liveBannerTitle = document.getElementById('liveBannerTitle');
+  const liveBannerLink = document.getElementById('liveBannerLink');
+  const liveSessionsList = document.getElementById('liveSessionsList');
+  const liveTitleInput = document.getElementById('liveTitleInput');
+  const liveHostInput = document.getElementById('liveHostInput');
+  const liveCreateBtn = document.getElementById('liveCreateBtn');
 
   const PLATFORM_LABEL = { youtube: 'YT', tiktok: 'TT', apple: 'AM' };
 
@@ -1049,6 +1095,56 @@
     wirePriceEdits(apparelGroups);
   }
 
+  const STATUS_LABEL = { live: 'LIVE', scheduled: 'SCHEDULED', ended: 'ENDED' };
+
+  function renderLiveSessionRow(s){
+    const links = [`<a href="/live/${encodeURIComponent(s.room_code)}" target="_blank" rel="noopener">Viewer link</a>`];
+    if (isAdmin) links.push(`<a href="/live/${encodeURIComponent(s.room_code)}/host" target="_blank" rel="noopener">Host console</a>`);
+    if (s.status === 'ended' && s.recording_path) links.push(`<a href="/live/${encodeURIComponent(s.room_code)}/replay" target="_blank" rel="noopener">Replay</a>`);
+    return `
+      <div class="live-session-row">
+        <span><span class="status-pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span> ${s.title}</span>
+        <span class="links">${links.join('')}</span>
+      </div>`;
+  }
+
+  async function loadLiveFromServer(){
+    const res = await fetch('/api/live');
+    const sessions = res.ok ? await res.json() : [];
+
+    const liveNow = sessions.find(s => s.status === 'live');
+    if (liveNow) {
+      liveBannerTitle.textContent = liveNow.title;
+      liveBannerLink.href = `/live/${encodeURIComponent(liveNow.room_code)}`;
+      liveBanner.style.display = 'flex';
+    } else {
+      liveBanner.style.display = 'none';
+    }
+
+    liveSessionsList.innerHTML = sessions.length
+      ? sessions.map(renderLiveSessionRow).join('')
+      : `<p class="live-empty">No live sessions yet — create one above when you're ready to go live.</p>`;
+  }
+
+  liveCreateBtn.addEventListener('click', async () => {
+    const title = liveTitleInput.value.trim();
+    if (!title) { alert('Give your live session a title first.'); return; }
+    liveCreateBtn.disabled = true;
+    liveCreateBtn.textContent = 'Creating…';
+    const res = await fetch('/api/live', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, host_name: liveHostInput.value.trim() })
+    });
+    liveCreateBtn.disabled = false;
+    liveCreateBtn.textContent = 'Create & Go Live';
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || 'Could not create that live session.'); return; }
+    liveTitleInput.value = ''; liveHostInput.value = '';
+    await loadLiveFromServer();
+    window.open(`/live/${encodeURIComponent(data.room_code)}/host`, '_blank', 'noopener');
+  });
+
   const musicSection = document.getElementById('music');
   const adminToggle = document.getElementById('adminToggle');
   const apparelAdminToggle = document.getElementById('apparelAdminToggle');
@@ -1070,6 +1166,7 @@
     renderList();
     loadProductsFromServer();
     loadApparelFromServer();
+    loadLiveFromServer();
   }
 
   function openLogin(){
