@@ -356,6 +356,43 @@ def too_large(e):
     return jsonify({"error": "That file is too large (300MB limit)."}), 413
 
 
+@app.get("/api/admin/disk-report")
+@login_required
+def disk_report():
+    """Diagnostic: which video files on disk are/aren't referenced by a track row,
+    and by an *active* track row. Read-only, admin-only."""
+    conn = get_db()
+    rows = conn.execute("SELECT id, title, active, src FROM tracks").fetchall()
+    conn.close()
+
+    referenced = {r["src"] for r in rows if r["src"]}
+    referenced_active = {r["src"] for r in rows if r["src"] and r["active"]}
+
+    files = []
+    total_bytes = 0
+    if VIDEOS_DIR.exists():
+        for p in sorted(VIDEOS_DIR.iterdir()):
+            if not p.is_file():
+                continue
+            size = p.stat().st_size
+            total_bytes += size
+            rel = f"videos/{p.name}"
+            files.append({
+                "name": p.name,
+                "size_mb": round(size / 1024 / 1024, 2),
+                "referenced": rel in referenced,
+                "referenced_by_active_track": rel in referenced_active,
+            })
+    files.sort(key=lambda f: -f["size_mb"])
+
+    return jsonify({
+        "video_file_count": len(files),
+        "video_dir_total_mb": round(total_bytes / 1024 / 1024, 2),
+        "tracks": [dict(r) for r in rows],
+        "files": files,
+    })
+
+
 @app.get("/api/products")
 def list_products():
     conn = get_db()
