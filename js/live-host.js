@@ -17,6 +17,23 @@
   const chatInput = document.getElementById("chat-input");
   const chatSend = document.getElementById("chat-send");
   const statusBadge = document.getElementById("status-badge");
+  const switchCameraBtn = document.getElementById("switch-camera-btn");
+  const filterSelect = document.getElementById("filter-select");
+
+  // Applied at canvas draw time, not to the raw camera feed -- this is why
+  // guests get it too: everyone's tile is drawn through this same filter
+  // before being broadcast, so there's nothing to apply on the guest side.
+  const FILTERS = {
+    none: "none",
+    vivid: "saturate(1.5) contrast(1.12) brightness(1.03)",
+    mono: "grayscale(1) contrast(1.1)",
+    noir: "grayscale(1) contrast(1.45) brightness(0.92)",
+    warm: "sepia(0.35) saturate(1.35) brightness(1.05)",
+    cool: "saturate(1.15) hue-rotate(-8deg) brightness(1.02) contrast(1.05)",
+    dreamy: "brightness(1.1) contrast(0.92) saturate(1.15) blur(0.4px)",
+  };
+  let currentFilter = filterSelect ? filterSelect.value : "vivid";
+  let currentFacingMode = "user"; // "user" = front/selfie camera, "environment" = back camera
 
   let hostStream = null;
   let finalStream = null; // composed video (canvas) + mixed audio, sent to viewers & recorded
@@ -26,6 +43,12 @@
   // keyed by socket id. The draw loop below tiles however many of these are
   // currently connected (plus the host) into a grid, Zoom/Meet-style.
   const guestConnections = new Map(); // sid -> { pc, video, name }
+  // A requester's peer connection is live (so the host can preview them)
+  // before any approve/decline decision is made. Entries here are NOT drawn
+  // to the canvas and their audio is NOT mixed into the broadcast -- only
+  // approveGuest() promotes an entry into guestConnections, at which point it
+  // starts appearing for viewers.
+  const pendingGuests = new Map(); // sid -> { pc, video, name, requestId, stream }
   const viewerConnections = {}; // sid -> RTCPeerConnection (host is offerer, broadcasting finalStream)
   let mediaRecorder = null;
   let recordedChunks = [];
@@ -44,7 +67,10 @@
 
   // ---------------- Camera + canvas compositing loop ----------------
   async function initCamera() {
-    hostStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    hostStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: currentFacingMode } },
+      audio: true,
+    });
     selfPreview.srcObject = hostStream;
 
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -58,6 +84,39 @@
     ]);
 
     drawLoop();
+  }
+
+  // Swaps the host's own camera between front/back. This never needs to touch
+  // any RTCPeerConnection: what viewers actually receive is the CANVAS's
+  // captured stream, and the canvas just draws whatever `selfPreview` shows
+  // right now -- so re-pointing selfPreview at a new video track is the whole
+  // fix. The mic (and the AudioContext node already wired to it) is left
+  // completely alone.
+  async function switchCamera() {
+    if (!hostStream) return;
+    const nextFacing = currentFacingMode === "user" ? "environment" : "user";
+    switchCameraBtn.disabled = true;
+    try {
+      const newVideoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: nextFacing } },
+      });
+      const newTrack = newVideoStream.getVideoTracks()[0];
+      const oldTrack = hostStream.getVideoTracks()[0];
+      hostStream.removeTrack(oldTrack);
+      oldTrack.stop();
+      hostStream.addTrack(newTrack);
+      selfPreview.srcObject = hostStream; // re-assign so the element notices the swap
+      currentFacingMode = nextFacing;
+    } catch (err) {
+      alert("Couldn't switch camera: " + err.message);
+    } finally {
+      switchCameraBtn.disabled = false;
+    }
+  }
+  switchCameraBtn.onclick = switchCamera;
+
+  if (filterSelect) {
+    filterSelect.onchange = () => { currentFilter = filterSelect.value; };
   }
 
   // "Cover"-style draw (like CSS object-fit: cover): fills the target cell
@@ -92,7 +151,10 @@
       const x = col * cellW;
       const y = row * cellH;
       if (tile.el.readyState >= 2) {
+        ctx.save();
+        ctx.filter = FILTERS[currentFilter] || "none";
         drawCover(tile.el, x, y, cellW, cellH);
+        ctx.restore();
       }
       ctx.save();
       ctx.strokeStyle = i === 0 ? "rgba(242,233,216,0.3)" : "#B23A22";
@@ -128,15 +190,19 @@
   }
 
   // ---------------- Guest cameras (viewer -> host), one connection per guest ----------------
-  function handleGuestOffer(fromSid, sdp, name) {
-    if (guestConnections.has(fromSid)) return; // duplicate offer, ignore
+  // The peer connection is established as soon as a request comes in, NOT on
+  // approval -- this is what lets the host actually see/hear the requester
+  // (via the visible preview video in the request row) before deciding.
+  // Nothing here reaches viewers yet: the video element isn't drawn by
+  // drawLoop and the audio isn't wired into mixDestination until approveGuest()
+  // promotes the entry into guestConnections.
+  function handleGuestOffer(fromSid, sdp, name, requestId) {
+    if (pendingGuests.has(fromSid) || guestConnections.has(fromSid)) return; // duplicate offer, ignore
 
     const video = document.createElement("video");
     video.autoplay = true;
     video.playsInline = true;
-    video.muted = false;
-    video.style.display = "none";
-    document.body.appendChild(video);
+    video.muted = false; // host can hear the requester too while deciding
 
     const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     pc.onicecandidate = (e) => {
@@ -146,15 +212,16 @@
     };
     pc.ontrack = (e) => {
       video.srcObject = e.streams[0];
-      audioCtx.createMediaStreamSource(e.streams[0]).connect(mixDestination);
+      const entry = pendingGuests.get(fromSid) || guestConnections.get(fromSid);
+      if (entry) entry.stream = e.streams[0];
     };
     pc.onconnectionstatechange = () => {
       if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-        removeGuest(fromSid);
+        removeAnyGuest(fromSid);
       }
     };
 
-    guestConnections.set(fromSid, { pc, video, name });
+    pendingGuests.set(fromSid, { pc, video, name, requestId });
 
     pc.setRemoteDescription(new RTCSessionDescription(sdp)).then(() => {
       return pc.createAnswer();
@@ -162,6 +229,32 @@
       pc.setLocalDescription(answer);
       socket.emit("webrtc_signal", { to: fromSid, kind: "guest", type: "guest-answer", sdp: answer });
     });
+
+    renderCameraRequestRow(fromSid, name, requestId, video);
+  }
+
+  // Host clicked "Approve": the connection is already live, so this just
+  // promotes it into the set drawLoop composites and wires its audio into the
+  // broadcast mix -- nothing needs to be renegotiated.
+  function approveGuest(sid) {
+    const entry = pendingGuests.get(sid);
+    if (!entry) return;
+    pendingGuests.delete(sid);
+    entry.video.style.display = "none";
+    document.body.appendChild(entry.video); // keep playing, out of the (removed) request row
+    if (entry.stream) {
+      audioCtx.createMediaStreamSource(entry.stream).connect(mixDestination);
+    }
+    guestConnections.set(sid, { pc: entry.pc, video: entry.video, name: entry.name });
+  }
+
+  // Host clicked "Decline": tear down the preview connection. Nothing was
+  // ever broadcast, so there's nothing else to undo.
+  function declineGuest(sid) {
+    const entry = pendingGuests.get(sid);
+    if (!entry) return;
+    pendingGuests.delete(sid);
+    try { entry.pc.close(); } catch (e) { /* already closed */ }
   }
 
   function removeGuest(sid) {
@@ -170,6 +263,61 @@
     try { g.pc.close(); } catch (e) { /* already closed */ }
     if (g.video.parentNode) g.video.parentNode.removeChild(g.video);
     guestConnections.delete(sid);
+  }
+
+  // Connection dropped before a decision was ever made (pending) vs. after
+  // approval (already live in the broadcast) need different cleanup.
+  function removeAnyGuest(sid) {
+    if (pendingGuests.has(sid)) {
+      const entry = pendingGuests.get(sid);
+      pendingGuests.delete(sid);
+      try { entry.pc.close(); } catch (e) { /* already closed */ }
+      const row = document.getElementById(`cam-req-${sid}`);
+      if (row) row.remove();
+    } else {
+      removeGuest(sid);
+    }
+  }
+
+  function renderCameraRequestRow(sid, name, requestId, videoEl) {
+    const row = document.createElement("div");
+    row.className = "camera-request-row";
+    row.id = `cam-req-${sid}`;
+
+    videoEl.className = "camera-preview-video";
+    row.appendChild(videoEl);
+
+    const info = document.createElement("span");
+    info.className = "camera-request-info";
+    info.textContent = `${name} would like to join on camera`;
+    row.appendChild(info);
+
+    const actions = document.createElement("span");
+    actions.className = "actions";
+
+    const approveBtn = document.createElement("button");
+    approveBtn.className = "btn btn-sm";
+    approveBtn.textContent = "Approve";
+    approveBtn.onclick = () => {
+      socket.emit("respond_camera", { room: ROOM, request_id: requestId, approve: true });
+      approveGuest(sid);
+      row.remove();
+    };
+
+    const denyBtn = document.createElement("button");
+    denyBtn.className = "btn btn-outline btn-sm";
+    denyBtn.textContent = "Decline";
+    denyBtn.style.marginLeft = "6px";
+    denyBtn.onclick = () => {
+      socket.emit("respond_camera", { room: ROOM, request_id: requestId, approve: false });
+      declineGuest(sid);
+      row.remove();
+    };
+
+    actions.appendChild(approveBtn);
+    actions.appendChild(denyBtn);
+    row.appendChild(actions);
+    camRequestsBox.appendChild(row);
   }
 
   // ---------------- Socket events ----------------
@@ -190,11 +338,9 @@
     } else if (data.kind === "broadcast" && data.type === "ice") {
       const pc = viewerConnections[data.from];
       if (pc) pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
-    } else if (data.kind === "guest" && data.type === "guest-offer") {
-      handleGuestOffer(data.from, data.sdp, data.name);
     } else if (data.kind === "guest" && data.type === "ice") {
-      const g = guestConnections.get(data.from);
-      if (g) g.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+      const entry = pendingGuests.get(data.from) || guestConnections.get(data.from);
+      if (entry) entry.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
     }
   });
 
@@ -204,31 +350,8 @@
   });
   socket.on("chat_message", (data) => appendChatLine(data.name, data.message));
 
-  socket.on("camera_request", (data) => {
-    const row = document.createElement("div");
-    row.className = "camera-request-row";
-    row.innerHTML = `<span>${escapeHtml(data.name)} would like to join on camera</span>`;
-    const approveBtn = document.createElement("button");
-    approveBtn.className = "btn btn-sm";
-    approveBtn.textContent = "Approve";
-    approveBtn.onclick = () => {
-      socket.emit("respond_camera", { room: ROOM, request_id: data.request_id, approve: true });
-      row.remove();
-    };
-    const denyBtn = document.createElement("button");
-    denyBtn.className = "btn btn-outline btn-sm";
-    denyBtn.textContent = "Not now";
-    denyBtn.style.marginLeft = "6px";
-    denyBtn.onclick = () => {
-      socket.emit("respond_camera", { room: ROOM, request_id: data.request_id, approve: false });
-      row.remove();
-    };
-    const actions = document.createElement("span");
-    actions.className = "actions";
-    actions.appendChild(approveBtn);
-    actions.appendChild(denyBtn);
-    row.appendChild(actions);
-    camRequestsBox.appendChild(row);
+  socket.on("camera_offer", (data) => {
+    handleGuestOffer(data.socket_id, data.sdp, data.name, data.request_id);
   });
 
   // ---------------- Controls ----------------
@@ -273,6 +396,8 @@
     statusBadge.className = "status-badge ended";
     Object.values(viewerConnections).forEach((pc) => pc.close());
     Array.from(guestConnections.keys()).forEach(removeGuest);
+    Array.from(pendingGuests.keys()).forEach(declineGuest);
+    camRequestsBox.innerHTML = "";
 
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
       await new Promise((resolve) => {

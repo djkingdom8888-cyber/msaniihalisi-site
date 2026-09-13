@@ -35,9 +35,13 @@
   .stage{background:#000; border:1px solid #362F24; position:relative;}
   #compose-canvas{width:100%; aspect-ratio:16/9; display:block; background:#000;}
   #self-preview{display:none;}
+  .stage-controls{display:flex; gap:8px; padding:10px; flex-wrap:wrap; align-items:center;}
+  #filter-select{background:#1A1410; border:2px solid #4A4030; color:var(--bone); padding:9px 12px; font-size:11px; font-family:'Inter'; text-transform:uppercase; letter-spacing:0.5px; font-weight:700;}
   #camera-requests{margin-top:16px; display:flex; flex-direction:column; gap:10px;}
   .camera-request-row{background:#24201A; border:1px solid #362F24; padding:10px 14px; display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px;}
-  .camera-request-row .actions{display:flex; gap:8px;}
+  .camera-request-row .actions{display:flex; gap:8px; flex-shrink:0;}
+  .camera-request-info{flex:1;}
+  .camera-preview-video{width:96px; height:72px; object-fit:cover; background:#000; border:1px solid #4A4030; border-radius:2px; flex-shrink:0;}
   .btn-sm{padding:7px 12px; font-size:10px;}
   .chat-panel{background:#24201A; border:1px solid #362F24; display:flex; flex-direction:column; height:100%; min-height:420px;}
   .chat-head{padding:14px 18px; border-bottom:1px solid #362F24; font-weight:800; font-size:12px; letter-spacing:1.5px; text-transform:uppercase; color:var(--brass);}
@@ -70,6 +74,18 @@
         <div class="stage">
           <canvas id="compose-canvas" width="1280" height="720"></canvas>
           <video id="self-preview" autoplay playsinline muted></video>
+          <div class="stage-controls">
+            <button id="switch-camera-btn" class="btn btn-outline btn-sm" type="button">Switch camera</button>
+            <select id="filter-select">
+              <option value="vivid" selected>Vivid</option>
+              <option value="none">None</option>
+              <option value="mono">Mono</option>
+              <option value="noir">Noir</option>
+              <option value="warm">Warm</option>
+              <option value="cool">Cool</option>
+              <option value="dreamy">Dreamy</option>
+            </select>
+          </div>
         </div>
         <div id="camera-requests"></div>
       </div>

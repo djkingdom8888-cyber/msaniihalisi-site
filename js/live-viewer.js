@@ -1,8 +1,10 @@
 // Viewer page: receives the host's composed broadcast over WebRTC, shows
-// live chat, and lets a viewer ask to join on camera -- if the host approves,
-// this becomes a second, separate RTCPeerConnection sending the viewer's own
-// camera INTO the host (see live-host.js's handleGuestOffer). This is a
-// request-then-approve model: the viewer asks, the host approves or declines.
+// live chat, and lets a viewer ask to join on camera. The viewer's own
+// RTCPeerConnection to the host (see live-host.js's handleGuestOffer) is
+// established immediately on request, NOT after approval -- this is what
+// lets the host actually preview the requester's live camera/mic before
+// deciding. Nothing reaches other viewers until the host approves; declining
+// just tears this preview connection back down.
 (function () {
   const ROOM = window.LIVE_ROOM;
   const socket = io();
@@ -19,11 +21,15 @@
   const nameSubmit = document.getElementById("name-submit");
   const statusBadge = document.getElementById("status-badge");
 
+  const switchCameraBtn = document.getElementById("switch-camera-btn");
+
   let myName = sessionStorage.getItem("mh_viewer_name") || "";
   let broadcastPc = null;
   let hostSid = null;
   let guestPc = null;
   let localGuestStream = null;
+  let guestFacingMode = "user";
+  let pendingGuestIce = []; // ICE candidates generated before we learn the host's sid
 
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -89,7 +95,14 @@
     } else if (data.kind === "broadcast" && data.type === "ice") {
       if (broadcastPc) broadcastPc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
     } else if (data.kind === "guest" && data.type === "guest-answer") {
-      if (guestPc) guestPc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      if (guestPc) {
+        guestPc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        if (!hostSid) hostSid = data.from;
+        if (pendingGuestIce.length) {
+          pendingGuestIce.forEach((c) => socket.emit("webrtc_signal", { to: hostSid, kind: "guest", type: "ice", candidate: c }));
+          pendingGuestIce = [];
+        }
+      }
     } else if (data.kind === "guest" && data.type === "ice") {
       if (guestPc) guestPc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
     }
@@ -100,38 +113,76 @@
     requestBtn.disabled = true;
     cameraStatus.textContent = "Requesting access to your camera…";
     try {
-      localGuestStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localGuestStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: guestFacingMode } },
+        audio: true,
+      });
     } catch (e) {
       cameraStatus.textContent = "Camera/mic access denied.";
       requestBtn.disabled = false;
       return;
     }
-    cameraStatus.textContent = "Waiting for the host to approve your request…";
-    socket.emit("request_camera", { room: ROOM, name: myName });
+    cameraStatus.textContent = "Connecting so the host can preview you…";
+    startGuestConnection();
   };
 
   socket.on("camera_response", (data) => {
     if (!data.approve) {
       cameraStatus.textContent = "The host isn't ready for you to join right now.";
       requestBtn.disabled = false;
-      if (localGuestStream) localGuestStream.getTracks().forEach((t) => t.stop());
+      if (guestPc) { try { guestPc.close(); } catch (e) { /* already closed */ } guestPc = null; }
+      if (localGuestStream) { localGuestStream.getTracks().forEach((t) => t.stop()); localGuestStream = null; }
       return;
     }
     cameraStatus.textContent = "You're live! The host can now see and hear you.";
-    startGuestConnection(data.host_sid);
+    if (switchCameraBtn) switchCameraBtn.classList.remove("hidden");
   });
 
-  function startGuestConnection(hostSidForGuest) {
+  // Unlike the host's own camera (which only feeds a canvas the host redraws
+  // locally), this stream is sent directly over guestPc -- so switching the
+  // camera here means replacing the actual outgoing track on the connection,
+  // not just swapping what a <video> element shows.
+  if (switchCameraBtn) {
+    switchCameraBtn.onclick = async () => {
+      if (!guestPc || !localGuestStream) return;
+      const nextFacing = guestFacingMode === "user" ? "environment" : "user";
+      switchCameraBtn.disabled = true;
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: nextFacing } },
+        });
+        const newTrack = newStream.getVideoTracks()[0];
+        const sender = guestPc.getSenders().find((s) => s.track && s.track.kind === "video");
+        if (sender) await sender.replaceTrack(newTrack);
+        const oldTrack = localGuestStream.getVideoTracks()[0];
+        localGuestStream.removeTrack(oldTrack);
+        oldTrack.stop();
+        localGuestStream.addTrack(newTrack);
+        guestFacingMode = nextFacing;
+      } catch (err) {
+        alert("Couldn't switch camera: " + err.message);
+      } finally {
+        switchCameraBtn.disabled = false;
+      }
+    };
+  }
+
+  function startGuestConnection() {
     guestPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     localGuestStream.getTracks().forEach((track) => guestPc.addTrack(track, localGuestStream));
     guestPc.onicecandidate = (e) => {
-      if (e.candidate) {
-        socket.emit("webrtc_signal", { to: hostSidForGuest, kind: "guest", type: "ice", candidate: e.candidate });
+      if (!e.candidate) return;
+      // We may not know the host's sid yet (it arrives on the guest-answer,
+      // not before) -- buffer until then instead of dropping candidates.
+      if (hostSid) {
+        socket.emit("webrtc_signal", { to: hostSid, kind: "guest", type: "ice", candidate: e.candidate });
+      } else {
+        pendingGuestIce.push(e.candidate);
       }
     };
     guestPc.createOffer().then((offer) => {
       guestPc.setLocalDescription(offer);
-      socket.emit("webrtc_signal", { to: hostSidForGuest, kind: "guest", type: "guest-offer", sdp: offer, name: myName });
+      socket.emit("camera_offer", { room: ROOM, name: myName, sdp: offer });
     });
   }
 
