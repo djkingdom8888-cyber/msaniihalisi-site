@@ -31,6 +31,39 @@
   let guestFacingMode = "user";
   let pendingGuestIce = []; // ICE candidates generated before we learn the host's sid
 
+  // ---------------- Connection watchdog for the broadcast stage ----------------
+  // The waiting overlay used to only ever be hidden by broadcastPc.ontrack
+  // firing (i.e. only once actual video frames arrive). With no TURN server
+  // configured (STUN only), a WebRTC connection across NATs -- different
+  // networks, mobile data, etc -- can fail silently, leaving a viewer staring
+  // at "Waiting for the host to go live…" forever with no feedback. This
+  // watchdog surfaces that instead of failing silently.
+  const CONNECTION_TIMEOUT_MS = 15000;
+  let videoTrackReceived = false;
+  let connectionWatchdogTimer = null;
+  let troubleShown = false;
+
+  function showConnectionTrouble() {
+    if (videoTrackReceived || troubleShown) return;
+    troubleShown = true;
+    if (stageWaiting) {
+      stageWaiting.textContent = "Having trouble connecting to the stream — try refreshing.";
+      stageWaiting.classList.remove("hidden");
+    }
+  }
+
+  function armConnectionWatchdog() {
+    if (connectionWatchdogTimer) clearTimeout(connectionWatchdogTimer);
+    connectionWatchdogTimer = setTimeout(showConnectionTrouble, CONNECTION_TIMEOUT_MS);
+  }
+
+  function clearConnectionWatchdog() {
+    if (connectionWatchdogTimer) {
+      clearTimeout(connectionWatchdogTimer);
+      connectionWatchdogTimer = null;
+    }
+  }
+
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
@@ -69,7 +102,26 @@
   socket.on("live_status", (data) => {
     statusBadge.textContent = data.status.toUpperCase();
     statusBadge.className = "status-badge " + data.status;
-    if (data.status !== "live" && stageWaiting) stageWaiting.classList.remove("hidden");
+    if (data.status === "live") {
+      // Status flipped to live, but actual video frames haven't necessarily
+      // arrived yet (that only happens once WebRTC finishes connecting and
+      // ontrack fires below) -- say so instead of leaving the now-incorrect
+      // "Waiting for the host to go live…" text up.
+      troubleShown = false;
+      if (stageWaiting && !videoTrackReceived) {
+        stageWaiting.textContent = "Host is live — connecting video…";
+        stageWaiting.classList.remove("hidden");
+      }
+      armConnectionWatchdog();
+    } else {
+      videoTrackReceived = false;
+      troubleShown = false;
+      clearConnectionWatchdog();
+      if (stageWaiting) {
+        stageWaiting.textContent = "Waiting for the host to go live…";
+        stageWaiting.classList.remove("hidden");
+      }
+    }
   });
 
   // ---------------- Receiving the host's broadcast ----------------
@@ -79,8 +131,23 @@
       broadcastPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       broadcastPc.ontrack = (e) => {
         hostVideo.srcObject = e.streams[0];
+        videoTrackReceived = true;
+        troubleShown = false;
+        clearConnectionWatchdog();
         if (stageWaiting) stageWaiting.classList.add("hidden");
       };
+      // No TURN server is configured, so a NAT/network that STUN can't punch
+      // through will land here as "failed" (or stay stuck "checking"/
+      // "connecting") -- catch it instead of leaving the viewer stuck on a
+      // waiting overlay with no explanation forever.
+      const onConnectionStateChange = () => {
+        if (broadcastPc.iceConnectionState === "failed" || broadcastPc.connectionState === "failed") {
+          showConnectionTrouble();
+        }
+      };
+      broadcastPc.oniceconnectionstatechange = onConnectionStateChange;
+      broadcastPc.onconnectionstatechange = onConnectionStateChange;
+      armConnectionWatchdog();
       broadcastPc.onicecandidate = (e) => {
         if (e.candidate) {
           socket.emit("webrtc_signal", { to: hostSid, kind: "broadcast", type: "ice", candidate: e.candidate });

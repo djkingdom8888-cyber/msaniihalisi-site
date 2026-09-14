@@ -618,7 +618,18 @@ def live_list():
     live_now = list_live_sessions(status="live")
     scheduled = list_live_sessions(status="scheduled")
     ended = [s for s in list_live_sessions(status="ended") if s["recording_path"]]
-    return render_template("live_list.html", live_now=live_now, scheduled=scheduled, ended=ended)
+    # Snapshot of id -> status at render time, handed to the page's JS so it
+    # can tell "this session's status just changed since I loaded" (to show
+    # the "just went live" banner) apart from "this is just how it already
+    # was when I opened the page".
+    initial_state = [
+        {"id": s["id"], "status": s["status"]}
+        for s in (list(live_now) + list(scheduled) + list(ended))
+    ]
+    return render_template(
+        "live_list.html", live_now=live_now, scheduled=scheduled, ended=ended,
+        initial_state=initial_state,
+    )
 
 
 @app.get("/live/<room_code>/replay")
@@ -671,6 +682,25 @@ def upload_recording(room_code):
 def api_list_live():
     rows = list_live_sessions()
     return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/live/status")
+def api_live_status():
+    """Lightweight JSON used by the /live listing page to poll for status
+    changes (e.g. a session moving from "scheduled" to "live") without a
+    manual reload. Intentionally small — just enough to redraw a card."""
+    rows = list_live_sessions()
+    return jsonify([
+        {
+            "id": r["id"],
+            "room_code": r["room_code"],
+            "title": r["title"],
+            "host_name": r["host_name"],
+            "status": r["status"],
+            "has_replay": bool(r["recording_path"]),
+        }
+        for r in rows
+    ])
 
 
 @app.post("/api/live")

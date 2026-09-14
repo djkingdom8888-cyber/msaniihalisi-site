@@ -52,10 +52,10 @@
   <section class="block">
     <div class="container">
       <h3>Live now</h3>
-      {% if live_now %}
-      <div class="grid">
+      <p class="empty" id="live-now-empty" {% if live_now %}style="display:none"{% endif %}>Nothing live right now — check back soon, or find your frequency in Halisi Sound below.</p>
+      <div class="grid" id="live-now-grid" {% if not live_now %}style="display:none"{% endif %}>
         {% for s in live_now %}
-        <div class="card">
+        <div class="card" data-id="{{ s['id'] }}">
           <span class="badge live"><span class="dot"></span> Live</span>
           <h4>{{ s['title'] }}</h4>
           <p>Hosted by {{ s['host_name'] or 'Msanii Halisi' }}</p>
@@ -63,19 +63,16 @@
         </div>
         {% endfor %}
       </div>
-      {% else %}
-      <p class="empty">Nothing live right now — check back soon, or find your frequency in Halisi Sound below.</p>
-      {% endif %}
     </div>
   </section>
 
   <section class="block">
     <div class="container">
       <h3>Scheduled</h3>
-      {% if scheduled %}
-      <div class="grid">
+      <p class="empty" id="scheduled-empty" {% if scheduled %}style="display:none"{% endif %}>Nothing scheduled yet.</p>
+      <div class="grid" id="scheduled-grid" {% if not scheduled %}style="display:none"{% endif %}>
         {% for s in scheduled %}
-        <div class="card">
+        <div class="card" data-id="{{ s['id'] }}">
           <span class="badge scheduled">Scheduled</span>
           <h4>{{ s['title'] }}</h4>
           <p>Hosted by {{ s['host_name'] or 'Msanii Halisi' }}</p>
@@ -83,19 +80,16 @@
         </div>
         {% endfor %}
       </div>
-      {% else %}
-      <p class="empty">Nothing scheduled yet.</p>
-      {% endif %}
     </div>
   </section>
 
   <section class="block">
     <div class="container">
       <h3>Replays</h3>
-      {% if ended %}
-      <div class="grid">
+      <p class="empty" id="ended-empty" {% if ended %}style="display:none"{% endif %}>No replays available yet.</p>
+      <div class="grid" id="ended-grid" {% if not ended %}style="display:none"{% endif %}>
         {% for s in ended %}
-        <div class="card">
+        <div class="card" data-id="{{ s['id'] }}">
           <span class="badge replay">Replay</span>
           <h4>{{ s['title'] }}</h4>
           <p>Hosted by {{ s['host_name'] or 'Msanii Halisi' }}</p>
@@ -103,10 +97,12 @@
         </div>
         {% endfor %}
       </div>
-      {% else %}
-      <p class="empty">No replays available yet.</p>
-      {% endif %}
     </div>
   </section>
+
+  <script>
+    window.LIVE_INITIAL_STATE = {{ initial_state|tojson }};
+  </script>
+  <script src="/js/live-list.js"></script>
 </body>
 </html>
