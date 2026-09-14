@@ -330,6 +330,12 @@
   }
   .player-list .del-track:hover{border-color:var(--brass); color:var(--brass); background:rgba(184,73,46,0.1);}
   .music-section.admin-mode .player-list .del-track{display:flex;}
+  .player-list .edit-track{
+    display:none; background:transparent; border:1px solid #4A4030; color:#B3A186; width:22px; height:22px;
+    min-width:22px; border-radius:50%; cursor:pointer; font-size:10px; align-items:center; justify-content:center; margin-left:8px;
+  }
+  .player-list .edit-track:hover{border-color:var(--brass); color:var(--brass); background:rgba(184,73,46,0.1);}
+  .music-section.admin-mode .player-list .edit-track{display:flex;}
 
   /* Halisi Live — live-now banner + admin "go live" panel */
   .live-banner{
@@ -351,6 +357,13 @@
   .live-session-row .status-pill.ended{background:#4A4030; color:#B3A186;}
   .live-session-row .links a{color:var(--brass); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-left:12px;}
   .live-session-row .links a:hover{color:var(--bone);}
+  .live-session-row .links button{
+    background:transparent; border:none; color:var(--brass); font-size:11px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.5px; margin-left:12px; cursor:pointer; font-family:'Inter';
+  }
+  .live-session-row .links button:hover{color:var(--bone);}
+  .live-session-row .links .live-delete-btn{color:#B23A22;}
+  .live-session-row .links .live-delete-btn:hover{color:#E0603F;}
   .live-empty{color:#8A7B63; font-size:12px;}
 
   .admin-toggle{
@@ -733,7 +746,7 @@
         <span class="idx">${String(i+1).padStart(2,'0')}</span>
         <span class="meta">${t.type ? `<span class="platform">${PLATFORM_LABEL[t.type] || ''}</span>` : ''}<span class="t">${t.title}</span><br><span class="a">${t.artist}</span></span>
         <span class="len">${t.len}</span>
-        ${isAdmin ? `<button class="del-track" type="button" data-idx="${i}" title="Delete track">✕</button>` : ''}
+        ${isAdmin ? `<button class="edit-track" type="button" data-idx="${i}" title="Edit title/artist">✎</button><button class="del-track" type="button" data-idx="${i}" title="Delete track">✕</button>` : ''}
       </li>`).join('');
     listEl.querySelectorAll('li').forEach(li => {
       li.addEventListener('click', () => loadTrack(parseInt(li.dataset.idx)));
@@ -741,6 +754,27 @@
     listEl.querySelectorAll('.del-track').forEach(btn => {
       btn.addEventListener('click', e => { e.stopPropagation(); deleteTrack(parseInt(btn.dataset.idx)); });
     });
+    listEl.querySelectorAll('.edit-track').forEach(btn => {
+      btn.addEventListener('click', e => { e.stopPropagation(); editTrack(parseInt(btn.dataset.idx)); });
+    });
+  }
+
+  async function editTrack(i){
+    const t = playlist[i];
+    const newTitle = prompt('Track title:', t.title);
+    if (newTitle === null) return;
+    const newArtist = prompt('Artist:', t.artist);
+    if (newArtist === null) return;
+    const res = await fetch(`/api/tracks/${encodeURIComponent(t.id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle.trim(), artist: newArtist.trim() })
+    });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || 'Could not update that track.'); return; }
+    t.title = newTitle.trim(); t.artist = newArtist.trim();
+    renderList();
+    if (i === current) { title.textContent = t.title; artist.textContent = t.artist; }
   }
 
   async function deleteTrack(i){
@@ -1101,6 +1135,10 @@
     const links = [`<a href="/live/${encodeURIComponent(s.room_code)}" target="_blank" rel="noopener">Viewer link</a>`];
     if (isAdmin) links.push(`<a href="/live/${encodeURIComponent(s.room_code)}/host" target="_blank" rel="noopener">Host console</a>`);
     if (s.status === 'ended' && s.recording_path) links.push(`<a href="/live/${encodeURIComponent(s.room_code)}/replay" target="_blank" rel="noopener">Replay</a>`);
+    if (isAdmin) {
+      links.push(`<button class="live-edit-btn" type="button" data-id="${s.id}" title="Edit title">✎ Edit</button>`);
+      links.push(`<button class="live-delete-btn" type="button" data-id="${s.id}" title="Delete${s.recording_path ? ' (also removes the saved recording)' : ''}">✕ Delete</button>`);
+    }
     return `
       <div class="live-session-row">
         <span><span class="status-pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span> ${s.title}</span>
@@ -1108,9 +1146,38 @@
       </div>`;
   }
 
+  async function editLiveSession(id){
+    const current = liveSessionsCache.find(s => s.id === id);
+    const newTitle = prompt('Session title:', current ? current.title : '');
+    if (newTitle === null || !newTitle.trim()) return;
+    const res = await fetch(`/api/live/${encodeURIComponent(id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle.trim() })
+    });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || 'Could not update that session.'); return; }
+    await loadLiveFromServer();
+  }
+
+  async function deleteLiveSession(id){
+    const current = liveSessionsCache.find(s => s.id === id);
+    const warning = current && current.recording_path
+      ? `Delete "${current.title}"? This also permanently removes its saved recording.`
+      : `Delete "${current ? current.title : 'this session'}"?`;
+    if (!confirm(warning)) return;
+    const res = await fetch(`/api/live/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    if (!res.ok) { alert('Could not delete that session.'); return; }
+    await loadLiveFromServer();
+  }
+
+  let liveSessionsCache = [];
+
   async function loadLiveFromServer(){
     const res = await fetch('/api/live');
     const sessions = res.ok ? await res.json() : [];
+    liveSessionsCache = sessions;
 
     const liveNow = sessions.find(s => s.status === 'live');
     if (liveNow) {
@@ -1124,6 +1191,12 @@
     liveSessionsList.innerHTML = sessions.length
       ? sessions.map(renderLiveSessionRow).join('')
       : `<p class="live-empty">No live sessions yet — create one above when you're ready to go live.</p>`;
+    liveSessionsList.querySelectorAll('.live-edit-btn').forEach(btn => {
+      btn.addEventListener('click', () => editLiveSession(btn.dataset.id));
+    });
+    liveSessionsList.querySelectorAll('.live-delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => deleteLiveSession(btn.dataset.id));
+    });
   }
 
   liveCreateBtn.addEventListener('click', async () => {
