@@ -274,6 +274,16 @@
   // Nothing here reaches viewers yet: the video element isn't drawn by
   // drawLoop and the audio isn't wired into mixDestination until approveGuest()
   // promotes the entry into guestConnections.
+  // No TURN server is configured (STUN only) -- a requester on a different
+  // network than the host (especially cellular/mobile data, which almost
+  // always sits behind carrier-grade NAT) can fail to connect here even
+  // though the request/signaling itself worked perfectly. Without this
+  // watchdog, that failure was invisible: the request row just showed a
+  // permanently blank video with a live Approve button, so a host could
+  // approve someone whose video/audio never actually arrived -- exactly the
+  // "host couldn't see the client" failure mode reported in production.
+  const GUEST_CONNECTION_TIMEOUT_MS = 12000;
+
   function handleGuestOffer(fromSid, sdp, name, requestId) {
     if (pendingGuests.has(fromSid) || guestConnections.has(fromSid)) return; // duplicate offer, ignore
 
@@ -283,6 +293,7 @@
     video.muted = false; // host can hear the requester too while deciding
 
     const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    let connectTimer = null;
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         socket.emit("webrtc_signal", { to: fromSid, kind: "guest", type: "ice", candidate: e.candidate });
@@ -292,7 +303,16 @@
       video.srcObject = e.streams[0];
       const entry = pendingGuests.get(fromSid) || guestConnections.get(fromSid);
       if (entry) entry.stream = e.streams[0];
+      clearTimeout(connectTimer);
+      setRequestRowStatus(fromSid, "live", "Live preview");
     };
+    const onIceStateChange = () => {
+      if (pc.iceConnectionState === "failed") {
+        clearTimeout(connectTimer);
+        setRequestRowStatus(fromSid, "failed", "⚠ Couldn't connect — likely a network issue on their end");
+      }
+    };
+    pc.oniceconnectionstatechange = onIceStateChange;
     pc.onconnectionstatechange = () => {
       if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
         removeAnyGuest(fromSid);
@@ -309,6 +329,11 @@
     });
 
     renderCameraRequestRow(fromSid, name, requestId, video);
+    connectTimer = setTimeout(() => {
+      if (!video.srcObject) {
+        setRequestRowStatus(fromSid, "failed", "⚠ Still connecting — their video/audio hasn't arrived yet, may be a network issue");
+      }
+    }, GUEST_CONNECTION_TIMEOUT_MS);
   }
 
   // Host clicked "Approve": the connection is already live, so this just
@@ -357,6 +382,17 @@
     }
   }
 
+  function setRequestRowStatus(sid, state, text) {
+    const row = document.getElementById(`cam-req-${sid}`);
+    if (!row) return;
+    row.dataset.connectionState = state;
+    const status = row.querySelector(".camera-request-status");
+    if (status) {
+      status.textContent = text;
+      status.className = "camera-request-status" + (state === "failed" ? " warn" : state === "live" ? " ok" : "");
+    }
+  }
+
   function renderCameraRequestRow(sid, name, requestId, videoEl) {
     const row = document.createElement("div");
     row.className = "camera-request-row";
@@ -365,10 +401,18 @@
     videoEl.className = "camera-preview-video";
     row.appendChild(videoEl);
 
+    const infoWrap = document.createElement("span");
+    infoWrap.className = "camera-request-info";
     const info = document.createElement("span");
-    info.className = "camera-request-info";
     info.textContent = `${name} would like to join on camera`;
-    row.appendChild(info);
+    const status = document.createElement("span");
+    status.className = "camera-request-status";
+    status.textContent = "Connecting…";
+    infoWrap.appendChild(info);
+    infoWrap.appendChild(document.createElement("br"));
+    infoWrap.appendChild(status);
+    row.appendChild(infoWrap);
+    row.dataset.connectionState = "connecting";
 
     const actions = document.createElement("span");
     actions.className = "actions";
@@ -377,6 +421,12 @@
     approveBtn.className = "btn btn-sm";
     approveBtn.textContent = "Approve";
     approveBtn.onclick = () => {
+      if (row.dataset.connectionState !== "live") {
+        const proceed = confirm(
+          "No video/audio has come through from this person yet (possible network issue on their end). Approve anyway?"
+        );
+        if (!proceed) return;
+      }
       socket.emit("respond_camera", { room: ROOM, request_id: requestId, approve: true });
       approveGuest(sid);
       row.remove();

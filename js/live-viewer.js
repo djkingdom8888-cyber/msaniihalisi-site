@@ -176,16 +176,40 @@
   });
 
   // ---------------- Asking to join on camera ----------------
+  // getUserMedia failures used to just change a small line of status text --
+  // easy to miss, especially on mobile, which produced confusing real-world
+  // reports of "nothing happened" with no clue why. Give each failure mode
+  // its own specific, hard-to-miss message instead of one generic line.
+  function describeGetUserMediaError(e) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return "Your browser blocked camera access on this page (this can happen inside an app's built-in browser, e.g. Instagram/Facebook — try opening this link in Safari or Chrome directly).";
+    }
+    switch (e && e.name) {
+      case "NotAllowedError":
+        return "Camera/mic permission was denied. Check your browser's site settings and allow camera + microphone access, then try again.";
+      case "NotFoundError":
+        return "No camera or microphone was found on this device.";
+      case "NotReadableError":
+        return "Your camera is already in use by another app. Close it and try again.";
+      default:
+        return "Couldn't access your camera/mic (" + ((e && e.name) || "unknown error") + "). Try again or use a different browser.";
+    }
+  }
+
   requestBtn.onclick = async () => {
     requestBtn.disabled = true;
     cameraStatus.textContent = "Requesting access to your camera…";
+    cameraStatus.classList.remove("warn");
     try {
       localGuestStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: guestFacingMode } },
         audio: true,
       });
     } catch (e) {
-      cameraStatus.textContent = "Camera/mic access denied.";
+      const message = describeGetUserMediaError(e);
+      cameraStatus.textContent = message;
+      cameraStatus.classList.add("warn");
+      alert(message);
       requestBtn.disabled = false;
       return;
     }
@@ -245,6 +269,18 @@
         socket.emit("webrtc_signal", { to: hostSid, kind: "guest", type: "ice", candidate: e.candidate });
       } else {
         pendingGuestIce.push(e.candidate);
+      }
+    };
+    // No TURN server is configured (STUN only) -- if this viewer is on a
+    // different network than the host (very commonly cellular data, which
+    // sits behind carrier-grade NAT), this connection can fail outright.
+    // Previously that failure was invisible: the UI would just sit on
+    // "Connecting so the host can preview you…" forever with no explanation.
+    guestPc.oniceconnectionstatechange = () => {
+      if (guestPc.iceConnectionState === "failed") {
+        cameraStatus.textContent = "⚠ Couldn't connect to the host — this usually means a network/firewall issue (try switching from cellular data to WiFi, or vice versa).";
+        cameraStatus.classList.add("warn");
+        requestBtn.disabled = false;
       }
     };
     guestPc.createOffer().then((offer) => {
