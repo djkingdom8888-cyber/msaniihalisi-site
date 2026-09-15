@@ -575,6 +575,7 @@
       <div class="section-head">
         <h2>Halisi Sound — Music &amp; Videos</h2>
         <div style="display:flex; align-items:center; gap:18px;">
+          <a href="/admin/analytics" id="analyticsLink" class="view-all" style="display:none;">📊 Analytics</a>
           <button id="adminToggle" class="admin-toggle" type="button">🔒 ADMIN MODE</button>
           <a href="/live" class="view-all">View All →</a>
         </div>
@@ -780,6 +781,16 @@
 
   const PLATFORM_LABEL = { youtube: 'YT', tiktok: 'TT', apple: 'AM' };
 
+  // Fire-and-forget analytics beacon. Never blocks the UI and never surfaces
+  // errors to the visitor -- if this fails (e.g. ad blocker), the site just
+  // works normally without that one data point.
+  function logAnalyticsEvent(eventType, itemId, itemLabel){
+    fetch('/api/analytics/event', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_type: eventType, item_id: itemId || '', item_label: itemLabel || '' })
+    }).catch(() => {});
+  }
+
   function isEmbedTrack(t){ return t.type === 'youtube' || t.type === 'tiktok' || t.type === 'apple'; }
   function isLocalVideo(t){ return t.type === 'video'; }
 
@@ -873,6 +884,7 @@
     title.textContent = t.title;
     artist.textContent = t.artist;
     renderList();
+    logAnalyticsEvent('track_play', t.id, t.title);
 
     const embed = isEmbedTrack(t);
     const localVideo = isLocalVideo(t);
@@ -1101,6 +1113,8 @@
       btn.addEventListener('click', async () => {
         const original = btn.textContent;
         btn.textContent = '...'; btn.disabled = true;
+        const productName = btn.closest('.track-card')?.querySelector('.name')?.textContent || '';
+        logAnalyticsEvent('checkout_start', btn.dataset.productId, productName);
         const res2 = await fetch('/api/checkout', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [btn.dataset.productId] })
         });
@@ -1177,6 +1191,8 @@
   async function checkoutApparel(productId, btn){
     const original = btn.textContent;
     btn.textContent = '...'; btn.disabled = true;
+    const item = apparelCache.find(a => a.id === productId);
+    logAnalyticsEvent('checkout_start', productId, item ? item.name : '');
     const res2 = await fetch('/api/checkout', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [productId] })
     });
@@ -1202,6 +1218,7 @@
     const item = apparelCache.find(a => a.id === itemId);
     if (!item) return;
     quickViewItem = item;
+    logAnalyticsEvent('apparel_quickview', item.id, item.name);
     if (cardEl) {
       cardEl.classList.add('pop');
       setTimeout(() => cardEl.classList.remove('pop'), 220);
@@ -1334,11 +1351,14 @@
   const loginPass = document.getElementById('loginPass');
   const loginError = document.getElementById('loginError');
 
+  const analyticsLink = document.getElementById('analyticsLink');
+
   function setAdminMode(on){
     isAdmin = on;
     musicSection.classList.toggle('admin-mode', on);
     apparelGroups.classList.toggle('admin-mode', on);
     uploadAdd.classList.toggle('show', on);
+    analyticsLink.style.display = on ? 'inline-block' : 'none';
     adminToggles.forEach(btn => {
       btn.classList.toggle('active', on);
       btn.textContent = on ? '🔓 LOG OUT' : '🔒 ADMIN LOGIN';

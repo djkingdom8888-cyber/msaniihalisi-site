@@ -1,6 +1,7 @@
 from gevent import monkey
 monkey.patch_all()
 
+import ipaddress
 import json
 import os
 import re
@@ -8,11 +9,14 @@ import sqlite3
 import subprocess
 import time
 import secrets
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import requests
 import stripe
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request, session, send_from_directory
+from flask import Flask, g, jsonify, render_template, request, session, send_from_directory
 from flask_socketio import SocketIO, join_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -202,6 +206,38 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'pending',
             requested_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        -- Analytics: one row per real page load. NOT written for API polling
+        -- endpoints, static assets, or the analytics endpoints themselves, so
+        -- this table reflects actual visits, not client "chatter".
+        CREATE TABLE IF NOT EXISTS page_views (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            ip_address TEXT,
+            country TEXT,
+            city TEXT,
+            device_type TEXT,
+            browser TEXT,
+            referrer TEXT,
+            visitor_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_page_views_created_at ON page_views(created_at);
+        CREATE INDEX IF NOT EXISTS idx_page_views_visitor ON page_views(visitor_id);
+
+        -- Analytics: everything that isn't a page load -- track/video plays,
+        -- apparel quick-view opens, checkout starts, and completed purchases
+        -- (the last one written from the Stripe webhook, not the browser).
+        CREATE TABLE IF NOT EXISTS analytics_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            item_id TEXT,
+            item_label TEXT,
+            visitor_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_type_item ON analytics_events(event_type, item_id);
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_created_at ON analytics_events(created_at);
         """
     )
     conn.commit()
@@ -254,8 +290,173 @@ def login_required(fn):
     return wrapper
 
 
+# ==================================================================
+# Analytics — visitor identity, IP/UA parsing, geolocation, logging
+#
+# Design notes (read this before porting to the sister sites):
+#   - Uniques are tracked via an anonymous `mh_visitor` cookie (random UUID,
+#     ~1yr expiry, httponly), NOT login/email -- most visitors never create
+#     an account, so this is the only realistic way to count "people" vs
+#     "page loads" without requiring a login wall.
+#   - "Demographics" here means location + device/browser + referrer + time
+#     patterns -- NOT age/gender/income, which simply isn't derivable from
+#     server logs without visitors self-reporting. See the report for how
+#     this should be communicated to the site owner.
+#   - Geolocation is best-effort and free (ip-api.com, no key, ~45 req/min).
+#     Private/loopback IPs are never sent out -- they're labeled "Local/Dev".
+#     Results are cached in-process per IP so repeat visits don't re-hit the
+#     API and don't risk the free-tier rate limit.
+# ==================================================================
+
+_geo_cache = {}  # ip_address -> (country, city), process-lifetime cache
+
+
+def get_client_ip():
+    """Prefer X-Forwarded-For (set by a reverse proxy, or by a test harness
+    simulating one) over the raw socket address, since this app is expected
+    to run behind a proxy in production. NOTE: if this app is ever exposed
+    directly to the internet without a trusted proxy in front of it, this
+    header is attacker-controlled -- fine for internal analytics, but don't
+    use get_client_ip() for security decisions (rate limiting already uses
+    request.remote_addr directly, on purpose)."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or ""
+
+
+def _is_private_ip(ip):
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True  # unparseable -> treat as non-routable, don't call out to ip-api
+    return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+
+
+def get_geo(ip):
+    """Returns (country, city). Never calls out for private/loopback/unparseable
+    IPs -- those are labeled "Local/Dev" per the no-geolocation-for-localhost
+    requirement. Caches every result (including failures) per IP for the life
+    of the process."""
+    if not ip or _is_private_ip(ip):
+        return ("Local/Dev", "Local/Dev")
+    if ip in _geo_cache:
+        return _geo_cache[ip]
+    result = ("Unknown", "Unknown")
+    try:
+        resp = requests.get(
+            f"http://ip-api.com/json/{ip}",
+            params={"fields": "status,country,city"},
+            timeout=2,
+        )
+        data = resp.json()
+        if data.get("status") == "success":
+            result = (data.get("country") or "Unknown", data.get("city") or "Unknown")
+    except (requests.RequestException, ValueError):
+        pass
+    _geo_cache[ip] = result
+    return result
+
+
+# Lightweight, dependency-free User-Agent parsing. Good enough for
+# mobile/tablet/desktop + top-browser breakdowns -- not meant to be a
+# bulletproof UA database.
+def parse_user_agent(ua):
+    ua_l = (ua or "").lower()
+
+    if "ipad" in ua_l or "tablet" in ua_l or "kindle" in ua_l or "playbook" in ua_l or \
+       ("android" in ua_l and "mobile" not in ua_l):
+        device_type = "tablet"
+    elif any(tok in ua_l for tok in ("mobi", "iphone", "ipod", "android", "windows phone")):
+        device_type = "mobile"
+    else:
+        device_type = "desktop"
+
+    # Order matters: many browsers spoof "Safari"/"Chrome" tokens in their UA
+    # string, so check the more specific tokens first.
+    if "edg/" in ua_l or "edga/" in ua_l or "edgios/" in ua_l:
+        browser = "Edge"
+    elif "opr/" in ua_l or "opera" in ua_l:
+        browser = "Opera"
+    elif "crios" in ua_l:
+        browser = "Chrome"
+    elif "fxios" in ua_l or "firefox" in ua_l:
+        browser = "Firefox"
+    elif "chrome" in ua_l or "chromium" in ua_l:
+        browser = "Chrome"
+    elif "safari" in ua_l:
+        browser = "Safari"
+    elif not ua_l:
+        browser = "Unknown"
+    else:
+        browser = "Other"
+
+    return device_type, browser
+
+
+@app.before_request
+def _assign_visitor_id():
+    existing = request.cookies.get("mh_visitor")
+    g.visitor_id = existing or str(uuid.uuid4())
+    g.visitor_id_is_new = not existing
+
+
+@app.after_request
+def _persist_visitor_cookie(response):
+    if getattr(g, "visitor_id_is_new", False):
+        response.set_cookie(
+            "mh_visitor", g.visitor_id,
+            max_age=60 * 60 * 24 * 365, httponly=True,
+            samesite="Lax", secure=IS_PRODUCTION,
+        )
+    return response
+
+
+def log_page_view(path):
+    """Call this from real page routes only -- never from API polling
+    endpoints, static assets, or the analytics endpoints themselves."""
+    ip = get_client_ip()
+    country, city = get_geo(ip)
+    device_type, browser = parse_user_agent(request.headers.get("User-Agent", ""))
+    referrer = (request.headers.get("Referer", "") or "")[:500]
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO page_views (path, ip_address, country, city, device_type, browser, referrer, visitor_id)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (path, ip, country, city, device_type, browser, referrer, g.visitor_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+ANALYTICS_EVENT_TYPES = {"track_play", "apparel_quickview", "checkout_start"}
+
+
+@app.post("/api/analytics/event")
+def log_analytics_event():
+    """Frontend-driven analytics events -- track/video plays, apparel
+    quick-view opens, and checkout starts. Completed purchases are logged
+    server-side from the Stripe webhook instead (see stripe_webhook()),
+    since that's the only place we can trust a purchase actually happened."""
+    data = request.get_json(silent=True) or {}
+    event_type = (data.get("event_type") or "").strip()
+    if event_type not in ANALYTICS_EVENT_TYPES:
+        return jsonify({"error": "invalid event_type"}), 400
+    item_id = (data.get("item_id") or "").strip()[:120]
+    item_label = (data.get("item_label") or "").strip()[:200]
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO analytics_events (event_type, item_id, item_label, visitor_id) VALUES (?,?,?,?)",
+        (event_type, item_id, item_label, g.visitor_id),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/")
 def index():
+    log_page_view("/")
     return send_from_directory(app.static_folder, "index.html")
 
 
@@ -669,6 +870,7 @@ def set_camera_request_status(request_id, status):
 
 @app.get("/live")
 def live_list():
+    log_page_view("/live")
     live_now = list_live_sessions(status="live")
     scheduled = list_live_sessions(status="scheduled")
     ended = [s for s in list_live_sessions(status="ended") if s["recording_path"]]
@@ -688,6 +890,7 @@ def live_list():
 
 @app.get("/live/<room_code>/replay")
 def live_replay(room_code):
+    log_page_view("/live/<room_code>/replay")
     live_session = get_live_session_by_room(room_code)
     if not live_session or not live_session["recording_path"]:
         return jsonify({"error": "Replay not found."}), 404
@@ -705,6 +908,7 @@ def live_host(room_code):
 
 @app.get("/live/<room_code>")
 def live_room(room_code):
+    log_page_view("/live/<room_code>")
     live_session = get_live_session_by_room(room_code)
     if not live_session:
         return jsonify({"error": "Live session not found."}), 404
@@ -1062,6 +1266,30 @@ def stripe_webhook():
             (obj.get("customer_details", {}).get("email"), shipping_details.get("name"),
              json.dumps(shipping_details.get("address")) if shipping_details.get("address") else None, obj["id"]),
         )
+        # Log a 'purchase' analytics event per line item -- this is the strongest
+        # per-item performance signal (view -> checkout-start -> purchase), and it's
+        # logged here rather than trusting a client-side callback, since a webhook
+        # firing is the only proof a purchase actually completed. No visitor_id is
+        # attached: Stripe calls this endpoint server-to-server, so there's no
+        # mh_visitor cookie on this request to attribute it to.
+        order_row = conn.execute(
+            "SELECT items FROM orders WHERE stripe_session_id = ?", (obj["id"],)
+        ).fetchone()
+        if order_row and order_row["items"]:
+            try:
+                item_ids = json.loads(order_row["items"])
+            except (TypeError, ValueError):
+                item_ids = []
+            for item_id in item_ids:
+                label_row = conn.execute(
+                    "SELECT name FROM apparel WHERE id = ? UNION ALL SELECT name FROM products WHERE id = ?",
+                    (item_id, item_id),
+                ).fetchone()
+                item_label = label_row["name"] if label_row else item_id
+                conn.execute(
+                    "INSERT INTO analytics_events (event_type, item_id, item_label, visitor_id) VALUES ('purchase', ?, ?, '')",
+                    (item_id, item_label),
+                )
         conn.commit()
         conn.close()
 
@@ -1121,6 +1349,146 @@ def order_ship(order_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True, **label})
+
+
+# ==================================================================
+# Analytics — admin dashboard
+# ==================================================================
+
+def _visit_totals(conn, since_expr=None):
+    if since_expr is None:
+        where, params = "1=1", ()
+    else:
+        where, params = "created_at >= datetime('now', ?)", (since_expr,)
+    visits = conn.execute(f"SELECT COUNT(*) FROM page_views WHERE {where}", params).fetchone()[0]
+    uniques = conn.execute(
+        f"SELECT COUNT(DISTINCT visitor_id) FROM page_views WHERE {where}", params
+    ).fetchone()[0]
+    return {"visits": visits, "unique_visitors": uniques}
+
+
+def build_analytics_summary():
+    conn = get_db()
+
+    totals = {
+        "all_time": _visit_totals(conn),
+        "last_7d": _visit_totals(conn, "-7 days"),
+        "last_30d": _visit_totals(conn, "-30 days"),
+    }
+
+    locations = [
+        dict(r) for r in conn.execute(
+            """SELECT country, city, COUNT(*) AS visits, COUNT(DISTINCT visitor_id) AS unique_visitors
+               FROM page_views GROUP BY country, city ORDER BY visits DESC LIMIT 15"""
+        ).fetchall()
+    ]
+
+    device_rows = conn.execute(
+        "SELECT device_type, COUNT(*) AS c FROM page_views GROUP BY device_type"
+    ).fetchall()
+    device_total = sum(r["c"] for r in device_rows) or 1
+    devices = {
+        (r["device_type"] or "unknown"): {"count": r["c"], "pct": round(r["c"] / device_total * 100, 1)}
+        for r in device_rows
+    }
+
+    browsers = [
+        {"browser": r["browser"] or "Unknown", "count": r["c"], "pct": round(r["c"] / device_total * 100, 1)}
+        for r in conn.execute(
+            "SELECT browser, COUNT(*) AS c FROM page_views GROUP BY browser ORDER BY c DESC LIMIT 10"
+        ).fetchall()
+    ]
+
+    referrers = [
+        dict(r) for r in conn.execute(
+            """SELECT COALESCE(NULLIF(TRIM(referrer), ''), 'Direct / None') AS referrer, COUNT(*) AS count
+               FROM page_views GROUP BY referrer ORDER BY count DESC LIMIT 10"""
+        ).fetchall()
+    ]
+
+    # Daily traffic for the last 30 days, zero-filled so the chart has no gaps.
+    daily_rows = {
+        r["d"]: {"visits": r["visits"], "unique_visitors": r["uniques"]}
+        for r in conn.execute(
+            """SELECT date(created_at) AS d, COUNT(*) AS visits, COUNT(DISTINCT visitor_id) AS uniques
+               FROM page_views WHERE created_at >= date('now', '-29 days')
+               GROUP BY d ORDER BY d ASC"""
+        ).fetchall()
+    }
+    today = datetime.utcnow().date()
+    daily_traffic = []
+    for i in range(29, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        entry = daily_rows.get(d, {"visits": 0, "unique_visitors": 0})
+        daily_traffic.append({"date": d, **entry})
+
+    # Top tracks/videos by play count -- every active track, ranked, including
+    # zero-play ones so a brand-new or dud upload is visible too.
+    track_rows = conn.execute("SELECT id, title, artist FROM tracks WHERE active = 1").fetchall()
+    play_counts = {
+        r["item_id"]: r["c"] for r in conn.execute(
+            "SELECT item_id, COUNT(*) AS c FROM analytics_events WHERE event_type = 'track_play' GROUP BY item_id"
+        ).fetchall()
+    }
+    top_tracks = sorted(
+        [
+            {"id": t["id"], "title": t["title"], "artist": t["artist"], "plays": play_counts.get(t["id"], 0)}
+            for t in track_rows
+        ],
+        key=lambda x: -x["plays"],
+    )
+
+    # Apparel performance: views (quick-view opens) -> checkout-starts -> purchases,
+    # for every currently-active apparel item, with a computed conversion rate.
+    # Small per-item queries are fine at boutique catalog sizes (tens of items);
+    # if this ever needs to scale to hundreds of SKUs, switch to a single
+    # GROUP BY item_id query joined against the apparel table.
+    apparel_rows = conn.execute(
+        "SELECT id, name, category FROM apparel WHERE active = 1 ORDER BY sort_order ASC"
+    ).fetchall()
+    apparel_performance = []
+    for a in apparel_rows:
+        views = conn.execute(
+            "SELECT COUNT(*) FROM analytics_events WHERE event_type = 'apparel_quickview' AND item_id = ?", (a["id"],)
+        ).fetchone()[0]
+        starts = conn.execute(
+            "SELECT COUNT(*) FROM analytics_events WHERE event_type = 'checkout_start' AND item_id = ?", (a["id"],)
+        ).fetchone()[0]
+        purchases = conn.execute(
+            "SELECT COUNT(*) FROM analytics_events WHERE event_type = 'purchase' AND item_id = ?", (a["id"],)
+        ).fetchone()[0]
+        conversion_rate = round(purchases / views * 100, 1) if views else 0.0
+        apparel_performance.append({
+            "id": a["id"], "name": a["name"], "category": a["category"],
+            "views": views, "checkout_starts": starts, "purchases": purchases,
+            "conversion_rate": conversion_rate,
+        })
+    apparel_performance.sort(key=lambda x: (-x["purchases"], -x["conversion_rate"], -x["views"]))
+
+    conn.close()
+
+    return {
+        "totals": totals,
+        "locations": locations,
+        "devices": devices,
+        "browsers": browsers,
+        "referrers": referrers,
+        "daily_traffic": daily_traffic,
+        "top_tracks": top_tracks,
+        "apparel_performance": apparel_performance,
+    }
+
+
+@app.get("/api/analytics/summary")
+@login_required
+def analytics_summary():
+    return jsonify(build_analytics_summary())
+
+
+@app.get("/admin/analytics")
+@login_required
+def admin_analytics():
+    return render_template("admin_analytics.html")
 
 
 # ==================================================================

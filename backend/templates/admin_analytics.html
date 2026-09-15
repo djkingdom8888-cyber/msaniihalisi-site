@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analytics · Msanii Halisi</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;0,6..96,600;1,6..96,500&family=Inter:wght@300;400;500;600;700;800&display=swap');
+  :root{
+    --ink:#17110B; --bone:#F2E9D8; --brass:#2F6B4F; --rust:#B23A22; --majorelle:#2F55C4;
+    --gray:#EDE4D3; --line:#DCD2BC; --text-gray:#6B5E4E;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{font-family:'Inter', sans-serif; color:var(--bone); background:var(--ink);}
+  a{color:inherit; text-decoration:none;}
+  h1,h2{font-family:'Bodoni Moda', serif; font-weight:500; letter-spacing:-0.01em;}
+  .container{max-width:1280px; margin:0 auto; padding:0 24px;}
+  header{padding:22px 0; border-bottom:1px solid #362F24;}
+  .back{color:#D8C9A3; font-size:12px; letter-spacing:1px; text-transform:uppercase; font-weight:700;}
+  .back:hover{color:var(--brass);}
+  .hero{padding:40px 0 20px;}
+  .hero .eyebrow{color:var(--brass); font-weight:700; font-size:12px; letter-spacing:2px; text-transform:uppercase;}
+  .hero h1{font-size:clamp(26px,3.6vw,38px); margin-top:8px;}
+  .hero p{color:#B3A186; font-size:13px; margin-top:10px; max-width:640px; line-height:1.6;}
+  section.block{padding:20px 0 40px;}
+  section.block h3{color:var(--bone); font-size:13px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:16px; padding-bottom:8px; border-bottom:2px solid var(--rust);}
+  .stat-row{display:grid; grid-template-columns:repeat(3,1fr); gap:20px;}
+  @media (max-width:820px){ .stat-row{grid-template-columns:1fr;} }
+  .stat-card{background:#24201A; border:1px solid #362F24; padding:20px;}
+  .stat-card .label{color:#8A7B63; font-size:11px; letter-spacing:1px; text-transform:uppercase; font-weight:700;}
+  .stat-card .value{font-family:'Bodoni Moda', serif; font-size:32px; margin-top:8px;}
+  .stat-card .sub{color:#B3A186; font-size:12px; margin-top:4px;}
+  .two-col{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+  @media (max-width:900px){ .two-col{grid-template-columns:1fr;} }
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; color:#8A7B63; font-size:11px; letter-spacing:0.8px; text-transform:uppercase; padding:8px 10px; border-bottom:1px solid #362F24;}
+  td{padding:9px 10px; border-bottom:1px solid #2A241C; color:var(--bone);}
+  tr:last-child td{border-bottom:none;}
+  .muted{color:#8A7B63;}
+  .bar-track{background:#362F24; height:8px; border-radius:4px; overflow:hidden;}
+  .bar-fill{background:var(--brass); height:100%;}
+  .empty{color:#8A7B63; font-size:13px; padding:12px 0;}
+  .chart-wrap{background:#24201A; border:1px solid #362F24; padding:20px; overflow-x:auto;}
+  .chart-wrap svg{display:block;}
+  .tag{display:inline-block; font-size:10px; font-weight:800; letter-spacing:0.5px; text-transform:uppercase; padding:2px 7px; border-radius:3px;}
+  .tag.top{background:var(--brass); color:var(--bone);}
+  .tag.under{background:var(--rust); color:var(--bone);}
+  .split{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+  @media (max-width:900px){ .split{grid-template-columns:1fr;} }
+  .note{color:#8A7B63; font-size:11.5px; line-height:1.6; margin-top:8px;}
+</style>
+</head>
+<body>
+  <header><div class="container"><a href="/" class="back">&larr; Msanii Halisi</a></div></header>
+
+  <div class="hero">
+    <div class="container">
+      <span class="eyebrow">Admin</span>
+      <h1>Analytics</h1>
+      <p>Visits, audience, and performance by track and apparel item. "Demographics" here means location, device/browser,
+      and referrer -- not age or gender, which isn't obtainable without visitors logging in or self-reporting.</p>
+    </div>
+  </div>
+
+  <section class="block">
+    <div class="container">
+      <h3>Visits &amp; unique visitors</h3>
+      <div class="stat-row" id="totalsRow"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="container">
+      <h3>Daily traffic — last 30 days</h3>
+      <div class="chart-wrap" id="chartWrap"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="container">
+      <div class="two-col">
+        <div>
+          <h3>Top locations</h3>
+          <div id="locationsTable"><p class="empty">Loading…</p></div>
+        </div>
+        <div>
+          <h3>Device &amp; browser</h3>
+          <div id="deviceTable"><p class="empty">Loading…</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="container">
+      <h3>Top referrers</h3>
+      <div id="referrersTable"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="container">
+      <h3>Top tracks &amp; videos</h3>
+      <div id="tracksTable"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="container">
+      <h3>Apparel performance — views &rarr; checkout starts &rarr; purchases</h3>
+      <p class="note">Views = quick-view opens. Sorted by purchases, then conversion rate, then views, so top performers
+      float to the top and underperformers (0 purchases / low conversion) sink to the bottom.</p>
+      <div id="apparelTable" style="margin-top:14px;"><p class="empty">Loading…</p></div>
+    </div>
+  </section>
+
+  <script>
+    const money = n => n.toLocaleString();
+
+    function renderEmpty(el, msg){ el.innerHTML = `<p class="empty">${msg}</p>`; }
+
+    function renderTotals(totals){
+      const el = document.getElementById('totalsRow');
+      const rows = [
+        ['All-time', totals.all_time],
+        ['Last 7 days', totals.last_7d],
+        ['Last 30 days', totals.last_30d],
+      ];
+      el.innerHTML = rows.map(([label, t]) => `
+        <div class="stat-card">
+          <div class="label">${label}</div>
+          <div class="value">${money(t.visits)}</div>
+          <div class="sub">${money(t.unique_visitors)} unique visitor${t.unique_visitors === 1 ? '' : 's'}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderChart(daily){
+      const el = document.getElementById('chartWrap');
+      if (!daily.length) { renderEmpty(el, 'No visits recorded yet.'); return; }
+      const w = Math.max(600, daily.length * 22);
+      const h = 160, padBottom = 20, padTop = 10;
+      const max = Math.max(1, ...daily.map(d => d.visits));
+      const barW = (w / daily.length) * 0.6;
+      const bars = daily.map((d, i) => {
+        const x = (w / daily.length) * i + (w / daily.length - barW) / 2;
+        const barH = ((h - padTop - padBottom) * d.visits) / max;
+        const y = h - padBottom - barH;
+        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" fill="#2F6B4F" rx="1.5">
+          <title>${d.date}: ${d.visits} visit${d.visits === 1 ? '' : 's'}, ${d.unique_visitors} unique</title>
+        </rect>`;
+      }).join('');
+      const labelEvery = Math.ceil(daily.length / 10);
+      const labels = daily.map((d, i) => {
+        if (i % labelEvery !== 0) return '';
+        const x = (w / daily.length) * i + (w / daily.length) / 2;
+        return `<text x="${x.toFixed(1)}" y="${h - 4}" font-size="9" fill="#8A7B63" text-anchor="middle">${d.date.slice(5)}</text>`;
+      }).join('');
+      el.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${bars}${labels}</svg>`;
+    }
+
+    function renderTable(el, headers, rows, cellsFn){
+      if (!rows.length) { renderEmpty(el, 'No data yet.'); return; }
+      el.innerHTML = `<table><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r => `<tr>${cellsFn(r).map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    }
+
+    function renderLocations(locations){
+      renderTable(
+        document.getElementById('locationsTable'),
+        ['Country', 'City', 'Visits', 'Unique'],
+        locations,
+        l => [l.country || 'Unknown', l.city || 'Unknown', money(l.visits), money(l.unique_visitors)]
+      );
+    }
+
+    function renderDevices(devices, browsers){
+      const el = document.getElementById('deviceTable');
+      const order = ['desktop', 'mobile', 'tablet'];
+      const deviceRows = order
+        .filter(k => devices[k])
+        .map(k => `
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+            <div style="width:70px; text-transform:capitalize; font-size:12.5px;">${k}</div>
+            <div class="bar-track" style="flex:1;"><div class="bar-fill" style="width:${devices[k].pct}%;"></div></div>
+            <div style="width:70px; text-align:right; font-size:12px; color:#B3A186;">${devices[k].pct}% (${money(devices[k].count)})</div>
+          </div>
+        `).join('');
+      const browserRows = browsers.map(b => `
+        <tr><td>${b.browser}</td><td>${money(b.count)}</td><td>${b.pct}%</td></tr>
+      `).join('');
+      el.innerHTML = `
+        <div style="margin-bottom:16px;">${deviceRows || '<p class="empty">No data yet.</p>'}</div>
+        ${browsers.length ? `<table><thead><tr><th>Browser</th><th>Views</th><th>Share</th></tr></thead><tbody>${browserRows}</tbody></table>` : ''}
+      `;
+    }
+
+    function renderReferrers(referrers){
+      renderTable(
+        document.getElementById('referrersTable'),
+        ['Referrer', 'Visits'],
+        referrers,
+        r => [r.referrer, money(r.count)]
+      );
+    }
+
+    function renderTracks(tracks){
+      renderTable(
+        document.getElementById('tracksTable'),
+        ['Title', 'Artist', 'Plays'],
+        tracks,
+        t => [t.title, t.artist, money(t.plays)]
+      );
+    }
+
+    function renderApparel(items){
+      const el = document.getElementById('apparelTable');
+      if (!items.length) { renderEmpty(el, 'No apparel listed yet.'); return; }
+      const maxViews = Math.max(1, ...items.map(i => i.views));
+      const rows = items.map((i, idx) => {
+        let tag = '';
+        if (i.purchases > 0 && idx === 0) tag = '<span class="tag top">Top performer</span>';
+        else if (i.views > 0 && i.purchases === 0 && idx === items.length - 1) tag = '<span class="tag under">Underperformer</span>';
+        return `<tr>
+          <td>${i.name} ${tag}</td>
+          <td style="text-transform:capitalize;">${i.category}</td>
+          <td>${money(i.views)}</td>
+          <td>${money(i.checkout_starts)}</td>
+          <td>${money(i.purchases)}</td>
+          <td>${i.conversion_rate}%</td>
+        </tr>`;
+      }).join('');
+      el.innerHTML = `<table><thead><tr><th>Item</th><th>Category</th><th>Views</th><th>Checkout starts</th><th>Purchases</th><th>View&rarr;Purchase</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    (async function init(){
+      const res = await fetch('/api/analytics/summary');
+      if (res.status === 401) {
+        document.body.innerHTML = '<div style="padding:60px; text-align:center; color:#B3A186;">Admin login required. <a href="/" style="color:#2F6B4F;">Go to the site and log in.</a></div>';
+        return;
+      }
+      const data = await res.json();
+      renderTotals(data.totals);
+      renderChart(data.daily_traffic);
+      renderLocations(data.locations);
+      renderDevices(data.devices, data.browsers);
+      renderReferrers(data.referrers);
+      renderTracks(data.top_tracks);
+      renderApparel(data.apparel_performance);
+    })();
+  </script>
+</body>
+</html>
