@@ -492,12 +492,42 @@
     chatInput.value = "";
   }
 
+  // Same iOS issue as the viewer side: the host's own phone can auto-lock
+  // mid-broadcast, and WebKit suspends the page the instant that happens --
+  // killing the camera, the broadcast, everything. Hold a Screen Wake Lock
+  // for the entire time the host is live, same API/pattern as live-viewer.js
+  // (see that file for the full explanation).
+  let hostWakeLock = null;
+  let hostWantWakeLock = false;
+
+  async function acquireHostWakeLock() {
+    hostWantWakeLock = true;
+    if (!("wakeLock" in navigator) || hostWakeLock) return;
+    try {
+      hostWakeLock = await navigator.wakeLock.request("screen");
+      hostWakeLock.addEventListener("release", () => { hostWakeLock = null; });
+    } catch (e) {
+      // Not supported, or denied (e.g. Low Power Mode) -- nothing else we
+      // can do client-side.
+    }
+  }
+
+  function releaseHostWakeLock() {
+    hostWantWakeLock = false;
+    if (hostWakeLock) { hostWakeLock.release().catch(() => {}); hostWakeLock = null; }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && hostWantWakeLock) acquireHostWakeLock();
+  });
+
   goLiveBtn.onclick = async () => {
     goLiveBtn.disabled = true;
     goLiveBtn.textContent = "Starting…";
     try {
       if (!hostStream) await initCamera();
       isLive = true;
+      acquireHostWakeLock();
       socket.emit("host_go_live", { room: ROOM });
       statusBadge.textContent = "LIVE";
       statusBadge.className = "status-badge live";
@@ -519,6 +549,7 @@
     endLiveBtn.disabled = true;
     endLiveBtn.textContent = "Saving…";
     isLive = false;
+    releaseHostWakeLock();
     socket.emit("host_end_live", { room: ROOM });
     statusBadge.textContent = "ENDED";
     statusBadge.className = "status-badge ended";
