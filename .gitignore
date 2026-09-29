@@ -4,5 +4,6 @@ __pycache__/
 .DS_Store
 msaniihalisi.db
 backend/INITIAL_ADMIN_CREDENTIALS.txt
+backend/.env
 videos/
 audio/

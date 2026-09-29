@@ -1,6 +1,7 @@
 from gevent import monkey
 monkey.patch_all()
 
+import base64
 import ipaddress
 import json
 import os
@@ -13,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import anthropic
 import requests
 import stripe
 from dotenv import load_dotenv
@@ -36,6 +38,10 @@ STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "").strip()
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
 stripe.api_key = STRIPE_SECRET_KEY
+
+# AI-assisted apparel descriptions (admin "Add Item" flow) -- gracefully degrades to
+# manual entry when unset, see describe_apparel_image() below.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
 IS_PRODUCTION = os.environ.get("FLASK_ENV", "development").strip().lower() == "production"
 
@@ -61,6 +67,51 @@ socketio = SocketIO(app, async_mode="gevent", max_http_buffer_size=300 * 1024 * 
 VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(exist_ok=True)
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "m4v", "webm"}
+
+APPAREL_DIR = SITE_DIR / "images" / "apparel"
+APPAREL_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif"}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB is plenty for a product photo; keeps this endpoint
+                                    # from doubling as a general-purpose large-file upload.
+_EXT_TO_KIND = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp", "gif": "gif"}
+_KIND_TO_MEDIA_TYPE = {
+    "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif",
+}
+
+
+def _sniff_image_kind(header):
+    """Cheap magic-byte check -- the actual defense against a renamed non-image file,
+    since a client-supplied extension/Content-Type can't be trusted on its own."""
+    if header[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if header[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if header[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _read_and_validate_image(file):
+    """Validates an uploaded image (extension + size + magic-byte sniff).
+    Returns (bytes, media_type, None) on success, or (None, None, (response, status)) on failure."""
+    if not file or not file.filename:
+        return None, None, (jsonify({"error": "No image file uploaded."}), 400)
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return None, None, (jsonify({
+            "error": f"Unsupported file type .{ext}. Allowed: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}"
+        }), 400)
+    data = file.read()
+    if len(data) > MAX_IMAGE_BYTES:
+        return None, None, (jsonify({
+            "error": f"That image is too large ({MAX_IMAGE_BYTES // (1024*1024)}MB limit)."
+        }), 413)
+    kind = _sniff_image_kind(data[:16])
+    if not kind or kind != _EXT_TO_KIND.get(ext):
+        return None, None, (jsonify({"error": "That file doesn't look like a valid image."}), 400)
+    return data, _KIND_TO_MEDIA_TYPE[kind], None
 
 _login_attempts = {}
 MAX_ATTEMPTS = 5
@@ -105,6 +156,30 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+DEFAULT_MARQUEE_TEXT = (
+    "Small-batch, made with intention · New pieces drop as they're ready · "
+    "Find your frequency · Customize yours, no rush required"
+)
+
+
+def get_setting(key, default=""):
+    conn = get_db()
+    row = conn.execute("SELECT value FROM site_settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO site_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
 
 
 def init_db():
@@ -238,6 +313,13 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_analytics_events_type_item ON analytics_events(event_type, item_id);
         CREATE INDEX IF NOT EXISTS idx_analytics_events_created_at ON analytics_events(created_at);
+
+        -- Small admin-editable key/value store for site copy that isn't tied to a
+        -- specific product/track -- e.g. the scrolling announcement strip text.
+        CREATE TABLE IF NOT EXISTS site_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
         """
     )
     conn.commit()
@@ -1083,6 +1165,132 @@ def add_apparel():
     return jsonify({"ok": True, "id": new_id})
 
 
+@app.post("/api/apparel/upload-image")
+@login_required
+def upload_apparel_image():
+    """Uploads a real product photo for a new apparel listing and returns the
+    relative path to hand to POST /api/apparel as image_path. Mirrors the
+    validation shape of /api/tracks/upload (extension check + size cap), plus a
+    magic-byte sniff since this accepts images rather than admin-only video files."""
+    file = request.files.get("image")
+    data, _media_type, err = _read_and_validate_image(file)
+    if err:
+        response, status = err
+        return response, status
+
+    ext = file.filename.rsplit(".", 1)[-1].lower()
+    base_name = secure_filename(file.filename.rsplit(".", 1)[0]) or "apparel"
+    filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
+    dest = APPAREL_DIR / filename
+    try:
+        dest.write_bytes(data)
+    except OSError:
+        dest.unlink(missing_ok=True)
+        return jsonify({
+            "error": "Upload failed: the server ran out of storage space. "
+                     "An admin needs to free up disk space or increase the disk size."
+        }), 507
+
+    return jsonify({"ok": True, "image_path": f"images/apparel/{filename}"})
+
+
+@app.get("/api/apparel/ai-status")
+@login_required
+def apparel_ai_status():
+    """Lets the Add Item form decide upfront whether to show the "Suggest with AI"
+    button or a not-configured note, instead of only finding out after a failed call."""
+    return jsonify({"configured": bool(ANTHROPIC_API_KEY)})
+
+
+@app.post("/api/apparel/describe")
+@login_required
+def describe_apparel_image():
+    """Vision-assisted name/description suggestion for a new apparel listing.
+    Accepts either a multipart 'image' file (used by the Add Item form before the
+    photo has been permanently uploaded) or a JSON/form 'image_path' referencing an
+    already-uploaded file under images/apparel/. Degrades gracefully -- returns a
+    structured "not configured" response instead of a 500 -- when ANTHROPIC_API_KEY
+    isn't set, so the rest of the Add Item flow never depends on this working."""
+    if not ANTHROPIC_API_KEY:
+        return jsonify({
+            "configured": False,
+            "error": "AI suggestions aren't configured yet — add ANTHROPIC_API_KEY to backend/.env to enable this.",
+        }), 501
+
+    file = request.files.get("image")
+    if file and file.filename:
+        data, media_type, err = _read_and_validate_image(file)
+        if err:
+            response, status = err
+            return response, status
+    else:
+        body = request.get_json(silent=True) or {}
+        rel_path = (body.get("image_path") or request.form.get("image_path") or "").strip()
+        if not rel_path.startswith("images/apparel/"):
+            return jsonify({"error": "Provide an 'image' file or an image_path under images/apparel/."}), 400
+        abs_path = (SITE_DIR / rel_path).resolve()
+        try:
+            abs_path.relative_to(APPAREL_DIR.resolve())
+        except ValueError:
+            return jsonify({"error": "Image not found."}), 404
+        if not abs_path.is_file():
+            return jsonify({"error": "Image not found."}), 404
+        ext = abs_path.suffix.lstrip(".").lower()
+        if ext not in ALLOWED_IMAGE_EXTENSIONS:
+            return jsonify({"error": "Unsupported image type."}), 400
+        data = abs_path.read_bytes()
+        if len(data) > MAX_IMAGE_BYTES:
+            return jsonify({"error": f"That image is too large ({MAX_IMAGE_BYTES // (1024*1024)}MB limit)."}), 413
+        kind = _sniff_image_kind(data[:16])
+        if not kind:
+            return jsonify({"error": "That file doesn't look like a valid image."}), 400
+        media_type = _KIND_TO_MEDIA_TYPE[kind]
+
+    prompt = (
+        "This is a product photo or mockup for an apparel listing on Msanii Halisi, a comfort-wear "
+        "brand about authenticity, frequency, healing, and ascension — the tone is soft, introspective, "
+        "and grounded, never hype-streetwear loud. Based only on what's actually visible in the photo, "
+        "suggest a short product name (a few words) and a 1-2 sentence marketing description in that "
+        "voice. Respond with ONLY minified JSON in this exact shape, no other text: "
+        '{"name": "...", "description": "..."}'
+    )
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": base64.b64encode(data).decode("ascii"),
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        raw_text = "".join(block.text for block in response.content if block.type == "text").strip()
+        suggestion = json.loads(raw_text)
+        name = str(suggestion.get("name") or "").strip()
+        description = str(suggestion.get("description") or "").strip()
+        if not name and not description:
+            raise ValueError("Empty suggestion")
+    except anthropic.AnthropicError as e:
+        return jsonify({"configured": True, "error": f"AI request failed: {e}"}), 502
+    except (ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
+        return jsonify({
+            "configured": True,
+            "error": "The AI response wasn't in the expected format — try again or fill this in manually.",
+        }), 502
+
+    return jsonify({"configured": True, "name": name, "description": description})
+
+
 @app.patch("/api/apparel/<item_id>")
 @login_required
 def edit_apparel(item_id):
@@ -1140,6 +1348,22 @@ def update_apparel_price(item_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "price": display, "price_cents": cents})
+
+
+@app.get("/api/settings/marquee")
+def get_marquee():
+    return jsonify({"text": get_setting("marquee_text", DEFAULT_MARQUEE_TEXT)})
+
+
+@app.patch("/api/settings/marquee")
+@login_required
+def update_marquee():
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "Announcement text cannot be empty."}), 400
+    set_setting("marquee_text", text[:500])
+    return jsonify({"ok": True, "text": text[:500]})
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
