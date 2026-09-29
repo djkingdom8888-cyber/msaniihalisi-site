@@ -46,6 +46,27 @@
   }
   .announce span.accent{color:var(--majorelle);}
 
+  /* Scrolling announcement strip (item 4) — pure CSS translateX loop, two copies
+     of the same text back-to-back so the loop reads seamlessly. */
+  .marquee{
+    background:var(--brass); color:var(--bone); overflow:hidden; position:relative;
+    padding:11px 0; white-space:nowrap;
+  }
+  .marquee-track{display:inline-flex; width:max-content; animation:marqueeScroll 26s linear infinite;}
+  .marquee:hover .marquee-track{animation-play-state:paused;}
+  .marquee-item{
+    font-family:'Inter'; font-size:12.5px; font-weight:600; letter-spacing:1px;
+    text-transform:uppercase; padding:0 28px; display:inline-block;
+  }
+  @keyframes marqueeScroll{from{transform:translateX(0);} to{transform:translateX(-50%);}}
+  .marquee-edit-btn{
+    display:none; position:absolute; top:6px; right:10px; width:24px; height:24px; border-radius:50%;
+    background:var(--ink); color:var(--bone); border:1px solid var(--bone); cursor:pointer; font-size:11px;
+    align-items:center; justify-content:center; z-index:2;
+  }
+  .marquee-edit-btn:hover{background:var(--bone); color:var(--ink);}
+  body.admin-mode .marquee-edit-btn{display:flex;}
+
   .trust-bar{
     background:var(--ink); color:var(--bone);
     font-size:12px; font-weight:300; letter-spacing:0.5px; text-transform:uppercase;
@@ -109,6 +130,26 @@
     background:var(--ink);
     display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden;
   }
+  /* Video-intro hero (item 3): a real <video> fills this pane once a loop file
+     exists at videos/hero-loop.mp4; until then .hero-visual-fallback (the original
+     word-mark art) stays visible so there's no broken/empty media placeholder. */
+  .hero-video{
+    display:none; position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; z-index:0;
+  }
+  .hero-video.has-source{display:block;}
+  .hero-visual-fallback{
+    position:relative; width:100%; height:100%;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .hero-video.has-source ~ .hero-visual-fallback{display:none;}
+  .video-placeholder-note{
+    position:absolute; top:18px; left:18px; right:18px; z-index:3;
+    background:rgba(23,17,11,0.75); border:1px dashed var(--brass); color:var(--bone);
+    font-family:'Inter'; font-size:11px; letter-spacing:0.3px; line-height:1.5;
+    padding:10px 12px; border-radius:2px;
+  }
+  .video-placeholder-note code{color:var(--brass); font-weight:600;}
   .grain{
     position:absolute; inset:0; z-index:0; opacity:0.05; pointer-events:none;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -174,13 +215,26 @@
   .price .now{color:var(--brass);}
 
   /* Real-photo apparel catalog, grouped by category */
-  .apparel-group{margin-bottom:48px;}
+  .apparel-group{margin-bottom:20px;}
   .apparel-group:last-child{margin-bottom:0;}
-  .apparel-group > h3{
+  .apparel-group > .apparel-group-head{
+    display:flex; align-items:center; justify-content:space-between; cursor:pointer;
     font-size:14px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase;
-    margin-bottom:18px; padding-bottom:8px; border-bottom:2px solid var(--rust); font-family:'Inter';
-    color:var(--ink);
+    margin-bottom:0; padding:0 0 12px; border-bottom:2px solid var(--rust); font-family:'Inter';
+    color:var(--ink); user-select:none;
   }
+  .apparel-group > .apparel-group-head .count{
+    color:var(--text-gray); font-weight:600; font-size:12px; letter-spacing:0.5px; margin-left:8px;
+  }
+  .apparel-group > .apparel-group-head .chevron{
+    font-size:12px; transition:transform 0.2s ease; display:inline-block;
+  }
+  .apparel-group.open > .apparel-group-head .chevron{transform:rotate(180deg);}
+  .apparel-group > .grid{
+    overflow:hidden; max-height:0; opacity:0; transition:max-height 0.3s ease, opacity 0.2s ease, margin 0.3s ease;
+    margin-top:0;
+  }
+  .apparel-group.open > .grid{max-height:4000px; opacity:1; margin-top:22px;}
   .apparel-card{position:relative;}
   .apparel-card .thumb{
     aspect-ratio:4/5; background:var(--gray); overflow:hidden; margin-bottom:12px; border:1px solid var(--line); padding:0;
@@ -193,6 +247,32 @@
   }
   #apparelGroups.admin-mode .apparel-delete{display:flex;}
   .apparel-delete:hover{background:var(--bone); color:var(--brass);}
+
+  /* Admin "Add Item" panel (item 1 + 2) — light-theme version of the dark
+     live-admin-panel pattern already used in the music section, since #shop
+     sits on the cream background rather than ink. */
+  .apparel-add-panel{display:none; background:var(--gray); border:1px solid var(--line); padding:22px 24px; margin-bottom:32px;}
+  #shop.admin-mode .apparel-add-panel{display:block;}
+  .apparel-add-panel h4{font-family:'Inter'; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; color:var(--brass); margin-bottom:14px;}
+  .apparel-add-form{display:flex; flex-direction:column; gap:12px; max-width:480px;}
+  .apparel-add-form select, .apparel-add-form input[type="text"], .apparel-add-form textarea{
+    background:var(--bone); border:1px solid var(--line); color:var(--ink); padding:11px 12px;
+    font-size:13px; font-family:'Inter'; border-radius:2px;
+  }
+  .apparel-add-form textarea{min-height:70px; resize:vertical;}
+  .apparel-add-row{display:flex; gap:12px; flex-wrap:wrap;}
+  .apparel-add-row select{flex:0 0 140px;}
+  .apparel-add-row .upload-file-label{flex:1; min-width:200px; background:var(--bone); border:1px dashed var(--line); color:var(--text-gray);}
+  .apparel-add-row .upload-file-label:hover{border-color:var(--brass); color:var(--ink);}
+  .apparel-add-preview{display:none; align-items:flex-start; gap:14px; margin-top:4px;}
+  .apparel-add-preview.show{display:flex;}
+  .apparel-add-preview img{width:96px; height:120px; object-fit:cover; border:1px solid var(--line);}
+  .ai-suggest-btn{align-self:flex-start; padding:10px 16px; font-size:11px;}
+  .ai-note{font-size:11px; color:var(--text-gray); font-style:italic; max-width:220px; line-height:1.4;}
+  .apparel-add-form > .btn{align-self:flex-start; margin-top:4px;}
+  .apparel-add-msg{font-size:12px; font-weight:700; min-height:16px;}
+  .apparel-add-msg.error{color:var(--rust);}
+  .apparel-add-msg.success{color:var(--brass);}
 
   /* Inline price editing (admin only) */
   .price-row{display:flex; align-items:center; gap:8px; margin-bottom:8px;}
@@ -531,15 +611,38 @@
         <a href="#custom" class="btn btn-outline">Customize Yours</a>
       </div>
     </div>
-    <div class="hero-visual">
-      <div class="grain" aria-hidden="true"></div>
-      <div class="word">
-        <span class="line-small">Msanii</span>
-        <span class="line-big red">Halisi.</span>
+    <div class="hero-visual" id="heroVisual">
+      <!--
+        VIDEO HERO PLACEHOLDER (item 3 — flagged for the site owner):
+        No real hero loop file has been supplied yet, so this intentionally has no
+        <source>, to avoid pointing at a video that doesn't exist. To go live:
+          1. Drop a looping video file at msaniihalisi/videos/hero-loop.mp4
+             (and optionally hero-loop.webm for broader browser support).
+          2. Add a <source> tag inside #heroVideo below, e.g.
+             <source src="videos/hero-loop.mp4" type="video/mp4">
+          3. Reload — the JS at the bottom of this file detects the source and
+             swaps the placeholder art below for the real video automatically.
+      -->
+      <video id="heroVideo" class="hero-video" muted loop playsinline autoplay aria-hidden="true"></video>
+      <div class="hero-visual-fallback" id="heroVisualFallback">
+        <div class="grain" aria-hidden="true"></div>
+        <div class="word">
+          <span class="line-small">Msanii</span>
+          <span class="line-big red">Halisi.</span>
+        </div>
+        <span class="tag">Galveston, TX</span>
+        <span class="video-placeholder-note">🎬 Video hero placeholder — this pane is ready for a real looping video. Drop the file at <code>videos/hero-loop.mp4</code> and add its &lt;source&gt; tag to go live.</span>
       </div>
-      <span class="tag">Galveston, TX</span>
     </div>
   </section>
+
+  <div class="marquee" id="marqueeStrip">
+    <div class="marquee-track" id="marqueeTrack">
+      <span class="marquee-item" id="marqueeText1">Loading…</span>
+      <span class="marquee-item" id="marqueeText2" aria-hidden="true">Loading…</span>
+    </div>
+    <button class="marquee-edit-btn" id="marqueeEditBtn" type="button" title="Edit announcement text">✎</button>
+  </div>
 
   <section class="verse-strip">
     <p class="verse">Comfort isn't escape — <span class="red">it's where healing begins</span>.</p>
@@ -552,6 +655,36 @@
         <h2>Shop the Collection</h2>
         <button id="apparelAdminToggle" class="admin-toggle" type="button">🔒 ADMIN MODE</button>
       </div>
+
+      <div class="apparel-add-panel" id="apparelAddPanel">
+        <h4>Add New Item</h4>
+        <div class="apparel-add-form">
+          <div class="apparel-add-row">
+            <select id="addCategory">
+              <option value="tshirt">T-Shirt</option>
+              <option value="hoodie">Hoodie</option>
+              <option value="hat">Hat</option>
+            </select>
+            <label class="upload-file-label">
+              <input type="file" id="addImageFile" accept="image/jpeg,image/png,image/webp,image/gif">
+              <span id="addImageFileName">Choose a product photo…</span>
+            </label>
+          </div>
+          <div class="apparel-add-preview" id="addImagePreviewWrap">
+            <img id="addImagePreview" src="" alt="Preview">
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <button class="btn btn-outline ai-suggest-btn" id="addSuggestBtn" type="button" style="display:none;">✨ Suggest with AI</button>
+              <span class="ai-note" id="addAiNote" style="display:none;"></span>
+            </div>
+          </div>
+          <input type="text" id="addName" placeholder="Product name">
+          <input type="text" id="addPrice" placeholder="Price (e.g. 42.00)">
+          <textarea id="addDescription" placeholder="Description (optional — editable anytime after listing too)"></textarea>
+          <button class="btn btn-red" id="addItemSubmitBtn" type="button">ADD ITEM</button>
+          <div class="apparel-add-msg" id="addItemMsg"></div>
+        </div>
+      </div>
+
       <div id="apparelGroups">
         <p style="color:var(--text-gray); font-size:13px;">No pieces listed yet — add your first drop from Admin Mode.</p>
       </div>
@@ -1148,6 +1281,21 @@
 
   let apparelCache = [];
 
+  // Collapsible catalogue (item 5): tracks which category sections are expanded
+  // across re-renders (e.g. after adding/deleting an item). Only the first
+  // category present is open by default -- a cleaner first impression on a
+  // catalogue with several categories, without hiding everything and making
+  // the section look empty on first load.
+  let openApparelCategories = null;
+
+  function renderApparelGroupHeader(cat, count){
+    return `
+      <div class="apparel-group-head" data-cat="${cat}">
+        <span>${CATEGORY_LABEL[cat] || cat}<span class="count">${count}</span></span>
+        <span class="chevron">▾</span>
+      </div>`;
+  }
+
   async function loadApparelFromServer(){
     const res = await fetch('/api/apparel');
     const items = res.ok ? await res.json() : [];
@@ -1158,13 +1306,28 @@
     }
     const byCategory = {};
     items.forEach(item => { (byCategory[item.category] = byCategory[item.category] || []).push(item); });
+    const presentCats = CATEGORY_ORDER.filter(cat => byCategory[cat]);
 
-    apparelGroups.innerHTML = CATEGORY_ORDER.filter(cat => byCategory[cat]).map(cat => `
-      <div class="apparel-group">
-        <h3>${CATEGORY_LABEL[cat] || cat}</h3>
+    if (!openApparelCategories) {
+      openApparelCategories = new Set(presentCats.length ? [presentCats[0]] : []);
+    }
+
+    apparelGroups.innerHTML = presentCats.map(cat => `
+      <div class="apparel-group ${openApparelCategories.has(cat) ? 'open' : ''}" data-cat="${cat}">
+        ${renderApparelGroupHeader(cat, byCategory[cat].length)}
         <div class="grid">${byCategory[cat].map(renderApparelCard).join('')}</div>
       </div>
     `).join('');
+
+    apparelGroups.querySelectorAll('.apparel-group-head').forEach(head => {
+      head.addEventListener('click', () => {
+        const group = head.closest('.apparel-group');
+        const cat = group.dataset.cat;
+        const willOpen = !group.classList.contains('open');
+        group.classList.toggle('open', willOpen);
+        if (willOpen) openApparelCategories.add(cat); else openApparelCategories.delete(cat);
+      });
+    });
 
     apparelGroups.querySelectorAll('.apparel-delete').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -1343,6 +1506,7 @@
   });
 
   const musicSection = document.getElementById('music');
+  const shopSection = document.getElementById('shop');
   const adminToggle = document.getElementById('adminToggle');
   const apparelAdminToggle = document.getElementById('apparelAdminToggle');
   const adminToggles = [adminToggle, apparelAdminToggle];
@@ -1353,9 +1517,24 @@
 
   const analyticsLink = document.getElementById('analyticsLink');
 
+  let aiConfigured = false;
+
+  async function refreshAiStatus(){
+    if (!isAdmin) { aiConfigured = false; return; }
+    try {
+      const res = await fetch('/api/apparel/ai-status');
+      const data = res.ok ? await res.json() : { configured: false };
+      aiConfigured = !!data.configured;
+    } catch (e) {
+      aiConfigured = false;
+    }
+  }
+
   function setAdminMode(on){
     isAdmin = on;
+    document.body.classList.toggle('admin-mode', on);
     musicSection.classList.toggle('admin-mode', on);
+    shopSection.classList.toggle('admin-mode', on);
     apparelGroups.classList.toggle('admin-mode', on);
     uploadAdd.classList.toggle('show', on);
     analyticsLink.style.display = on ? 'inline-block' : 'none';
@@ -1367,6 +1546,7 @@
     loadProductsFromServer();
     loadApparelFromServer();
     loadLiveFromServer();
+    refreshAiStatus();
   }
 
   function openLogin(){
@@ -1413,10 +1593,154 @@
     else { signupMsg.textContent = data.error || 'Something went wrong — try again.'; }
   });
 
+  // ---------------- Video hero (item 3) ----------------
+  // If a real <source> has been added inside #heroVideo (see the placeholder
+  // comment in the HTML), show the video and hide the word-mark placeholder art.
+  // Left as a no-op — no console errors — until a real file is supplied.
+  const heroVideoEl = document.getElementById('heroVideo');
+  if (heroVideoEl.querySelector('source')) {
+    heroVideoEl.classList.add('has-source');
+  }
+
+  // ---------------- Scrolling announcement strip (item 4) ----------------
+  const marqueeText1 = document.getElementById('marqueeText1');
+  const marqueeText2 = document.getElementById('marqueeText2');
+  const marqueeEditBtn = document.getElementById('marqueeEditBtn');
+
+  async function loadMarquee(){
+    const res = await fetch('/api/settings/marquee');
+    const data = res.ok ? await res.json() : { text: '' };
+    const text = data.text || '';
+    marqueeText1.textContent = text;
+    marqueeText2.textContent = text;
+  }
+
+  marqueeEditBtn.addEventListener('click', async () => {
+    if (!isAdmin) return;
+    const newText = prompt('Announcement strip text:', marqueeText1.textContent);
+    if (newText === null || !newText.trim()) return;
+    const res = await fetch('/api/settings/marquee', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: newText.trim() })
+    });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || 'Could not update the announcement text.'); return; }
+    await loadMarquee();
+  });
+
+  // ---------------- Admin "Add Item" flow (items 1 + 2) ----------------
+  const addCategory = document.getElementById('addCategory');
+  const addImageFile = document.getElementById('addImageFile');
+  const addImageFileName = document.getElementById('addImageFileName');
+  const addImagePreviewWrap = document.getElementById('addImagePreviewWrap');
+  const addImagePreview = document.getElementById('addImagePreview');
+  const addSuggestBtn = document.getElementById('addSuggestBtn');
+  const addAiNote = document.getElementById('addAiNote');
+  const addName = document.getElementById('addName');
+  const addPrice = document.getElementById('addPrice');
+  const addDescription = document.getElementById('addDescription');
+  const addItemSubmitBtn = document.getElementById('addItemSubmitBtn');
+  const addItemMsg = document.getElementById('addItemMsg');
+
+  addImageFile.addEventListener('change', () => {
+    const file = addImageFile.files[0];
+    addImageFileName.textContent = file ? file.name : 'Choose a product photo…';
+    if (!file) { addImagePreviewWrap.classList.remove('show'); return; }
+    const reader = new FileReader();
+    reader.onload = () => { addImagePreview.src = reader.result; };
+    reader.readAsDataURL(file);
+    addImagePreviewWrap.classList.add('show');
+    if (aiConfigured) {
+      addSuggestBtn.style.display = 'inline-block';
+      addAiNote.style.display = 'none';
+    } else {
+      addSuggestBtn.style.display = 'none';
+      addAiNote.style.display = 'inline';
+      addAiNote.textContent = "AI suggestions aren't configured yet — add ANTHROPIC_API_KEY to backend/.env to enable this. Fill in the name/description manually below.";
+    }
+  });
+
+  addSuggestBtn.addEventListener('click', async () => {
+    const file = addImageFile.files[0];
+    if (!file) return;
+    const original = addSuggestBtn.textContent;
+    addSuggestBtn.textContent = 'Thinking…'; addSuggestBtn.disabled = true;
+    const form = new FormData();
+    form.append('image', file);
+    const res = await fetch('/api/apparel/describe', { method: 'POST', body: form });
+    addSuggestBtn.textContent = original; addSuggestBtn.disabled = false;
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 501 || data.configured === false) {
+      aiConfigured = false;
+      addSuggestBtn.style.display = 'none';
+      addAiNote.style.display = 'inline';
+      addAiNote.textContent = data.error || "AI suggestions aren't configured yet.";
+      return;
+    }
+    if (!res.ok) { alert(data.error || 'Could not get an AI suggestion — fill this in manually.'); return; }
+    if (data.name && !addName.value.trim()) addName.value = data.name;
+    if (data.description && !addDescription.value.trim()) addDescription.value = data.description;
+  });
+
+  addItemSubmitBtn.addEventListener('click', async () => {
+    if (!isAdmin) { alert('Log in as admin to add items.'); return; }
+    const file = addImageFile.files[0];
+    const name = addName.value.trim();
+    const price = addPrice.value.trim();
+    addItemMsg.className = 'apparel-add-msg';
+    if (!file) { addItemMsg.classList.add('error'); addItemMsg.textContent = 'Choose a product photo first.'; return; }
+    if (!name) { addItemMsg.classList.add('error'); addItemMsg.textContent = 'Give the item a name.'; return; }
+    if (!price) { addItemMsg.classList.add('error'); addItemMsg.textContent = 'Enter a price.'; return; }
+
+    const original = addItemSubmitBtn.textContent;
+    addItemSubmitBtn.textContent = 'ADDING…'; addItemSubmitBtn.disabled = true;
+    addItemMsg.textContent = '';
+
+    const imageForm = new FormData();
+    imageForm.append('image', file);
+    const uploadRes = await fetch('/api/apparel/upload-image', { method: 'POST', body: imageForm });
+    if (uploadRes.status === 401) {
+      alert('Your session expired — please log in again.'); setAdminMode(false);
+      addItemSubmitBtn.textContent = original; addItemSubmitBtn.disabled = false;
+      return;
+    }
+    const uploadData = await uploadRes.json().catch(() => ({}));
+    if (!uploadRes.ok) {
+      addItemMsg.classList.add('error'); addItemMsg.textContent = uploadData.error || 'Photo upload failed.';
+      addItemSubmitBtn.textContent = original; addItemSubmitBtn.disabled = false;
+      return;
+    }
+
+    const createRes = await fetch('/api/apparel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, category: addCategory.value, price,
+        description: addDescription.value.trim(), image_path: uploadData.image_path,
+      })
+    });
+    addItemSubmitBtn.textContent = original; addItemSubmitBtn.disabled = false;
+    if (createRes.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    const createData = await createRes.json().catch(() => ({}));
+    if (!createRes.ok) {
+      addItemMsg.classList.add('error'); addItemMsg.textContent = createData.error || 'Could not add that item.';
+      return;
+    }
+
+    addItemMsg.classList.add('success'); addItemMsg.textContent = 'Added to the catalogue.';
+    addImageFile.value = ''; addImageFileName.textContent = 'Choose a product photo…';
+    addImagePreviewWrap.classList.remove('show'); addImagePreview.src = '';
+    addName.value = ''; addPrice.value = ''; addDescription.value = '';
+    addSuggestBtn.style.display = 'none'; addAiNote.style.display = 'none';
+    if (openApparelCategories) openApparelCategories.add(addCategory.value);
+    await loadApparelFromServer();
+  });
+
   (async function init(){
     await loadTracksFromServer();
     if (playlist.length) { loadTrack(0); }
     else { screenTitle.textContent = 'No tracks available'; title.textContent = '—'; artist.textContent = '—'; }
+    await loadMarquee();
     const meRes = await fetch('/api/me');
     const me = await meRes.json().catch(() => ({ loggedIn: false }));
     setAdminMode(!!me.loggedIn);
