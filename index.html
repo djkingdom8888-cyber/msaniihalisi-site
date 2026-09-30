@@ -214,27 +214,18 @@
   .price .was{text-decoration:line-through; color:#9C8B72; font-weight:300; margin-right:8px;}
   .price .now{color:var(--brass);}
 
-  /* Real-photo apparel catalog, grouped by category */
-  .apparel-group{margin-bottom:20px;}
-  .apparel-group:last-child{margin-bottom:0;}
-  .apparel-group > .apparel-group-head{
-    display:flex; align-items:center; justify-content:space-between; cursor:pointer;
-    font-size:14px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase;
-    margin-bottom:0; padding:0 0 12px; border-bottom:2px solid var(--rust); font-family:'Inter';
-    color:var(--ink); user-select:none;
-  }
-  .apparel-group > .apparel-group-head .count{
-    color:var(--text-gray); font-weight:600; font-size:12px; letter-spacing:0.5px; margin-left:8px;
-  }
-  .apparel-group > .apparel-group-head .chevron{
-    font-size:12px; transition:transform 0.2s ease; display:inline-block;
-  }
-  .apparel-group.open > .apparel-group-head .chevron{transform:rotate(180deg);}
+  /* Real-photo apparel catalog. The category tiles above act as tabs; each
+     one has a matching .apparel-group panel that spills open directly below
+     the tile row. Only one panel is ever "open" (true tab behaviour, not an
+     accordion) -- reuses the same max-height/opacity reveal transition that
+     originally lived on a separate accordion header, just retargeted so the
+     tiles themselves are the trigger and label. */
+  .apparel-group{margin-bottom:0;}
   .apparel-group > .grid{
     overflow:hidden; max-height:0; opacity:0; transition:max-height 0.3s ease, opacity 0.2s ease, margin 0.3s ease;
     margin-top:0;
   }
-  .apparel-group.open > .grid{max-height:4000px; opacity:1; margin-top:22px;}
+  .apparel-group.open > .grid{max-height:4000px; opacity:1; margin-top:0;}
   .apparel-card{position:relative;}
   .apparel-card .thumb{
     aspect-ratio:4/5; background:var(--gray); overflow:hidden; margin-bottom:12px; border:1px solid var(--line); padding:0;
@@ -247,6 +238,35 @@
   }
   #apparelGroups.admin-mode .apparel-delete{display:flex;}
   .apparel-delete:hover{background:var(--bone); color:var(--brass);}
+
+  /* Category photo tiles — a "best shot" per category (Hoodies/T-Shirts/
+     Headwear) that act as tabs. Clicking one marks it active and spills its
+     catalogue panel open directly beneath the tile row (.apparel-group below,
+     see rules above) -- no scrolling to a separate section elsewhere. */
+  .apparel-cat-tiles{display:grid; grid-template-columns:repeat(3,1fr); gap:20px; margin-bottom:24px;}
+  .apparel-cat-tile{
+    position:relative; display:block; width:100%; aspect-ratio:4/3; overflow:hidden;
+    border:2px solid var(--line); background:var(--gray); cursor:pointer; padding:0;
+    transition:border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .apparel-cat-tile.active{border-color:var(--brass); box-shadow:0 0 0 2px var(--brass) inset;}
+  .apparel-cat-tile img{width:100%; height:100%; object-fit:cover; display:block; transition:transform 0.4s ease;}
+  .apparel-cat-tile:hover img{transform:scale(1.05);}
+  .apparel-cat-tile .scrim{
+    position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(180deg, rgba(23,17,11,0) 45%, rgba(23,17,11,0.88) 100%);
+  }
+  .apparel-cat-tile .tile-label{
+    position:absolute; left:16px; right:16px; bottom:14px; text-align:left; pointer-events:none;
+  }
+  .apparel-cat-tile .tile-label .name{
+    display:block; font-family:'Bodoni Moda', serif; font-weight:500; font-size:22px;
+    color:var(--bone); letter-spacing:0.3px;
+  }
+  .apparel-cat-tile .tile-label .num{
+    display:block; font-family:'Inter'; font-weight:700; font-size:11px; letter-spacing:1.5px;
+    text-transform:uppercase; color:var(--bone); opacity:0.75; margin-top:4px;
+  }
 
   /* Admin "Add Item" panel (item 1 + 2) — light-theme version of the dark
      live-admin-panel pattern already used in the music section, since #shop
@@ -567,6 +587,7 @@
     .hero-visual{min-height:320px; order:-1;}
     .custom-banner{grid-template-columns:1fr;}
     .footer-grid{grid-template-columns:1fr 1fr;}
+    .apparel-cat-tiles{grid-template-columns:1fr;}
     nav ul{display:none;}
   }
 </style>
@@ -684,6 +705,8 @@
           <div class="apparel-add-msg" id="addItemMsg"></div>
         </div>
       </div>
+
+      <div class="apparel-cat-tiles" id="apparelCatTiles"></div>
 
       <div id="apparelGroups">
         <p style="color:var(--text-gray); font-size:13px;">No pieces listed yet — add your first drop from Admin Mode.</p>
@@ -1262,6 +1285,7 @@
   }
 
   const apparelGroups = document.getElementById('apparelGroups');
+  const apparelCatTiles = document.getElementById('apparelCatTiles');
   const CATEGORY_LABEL = { tshirt: 'T-Shirts', hoodie: 'Hoodies', hat: 'Headwear' };
   const CATEGORY_ORDER = ['hoodie', 'tshirt', 'hat'];
 
@@ -1281,19 +1305,62 @@
 
   let apparelCache = [];
 
-  // Collapsible catalogue (item 5): tracks which category sections are expanded
-  // across re-renders (e.g. after adding/deleting an item). Only the first
-  // category present is open by default -- a cleaner first impression on a
-  // catalogue with several categories, without hiding everything and making
-  // the section look empty on first load.
-  let openApparelCategories = null;
+  // Category tiles double as tabs (item 5): tracks which single category's
+  // panel is currently spilled open beneath the tile row. True tab behaviour
+  // -- only one category open at a time, matching "click a tile, its
+  // catalogue spills out right there" rather than an accordion where several
+  // sections could stack open at once. Persists across re-renders (e.g.
+  // after adding/deleting an item). Defaults to the first category present
+  // so the panel isn't empty on first load.
+  let activeApparelCategory = null;
 
-  function renderApparelGroupHeader(cat, count){
-    return `
-      <div class="apparel-group-head" data-cat="${cat}">
-        <span>${CATEGORY_LABEL[cat] || cat}<span class="count">${count}</span></span>
-        <span class="chevron">▾</span>
-      </div>`;
+  // Opens the given category's panel (closing whichever one was open) and
+  // syncs the active/highlighted state on the matching tile. Shared by the
+  // tile click handler and by post-add/-delete refreshes.
+  function setActiveApparelCategory(cat){
+    activeApparelCategory = cat;
+    apparelCatTiles.querySelectorAll('.apparel-cat-tile').forEach(t => {
+      t.classList.toggle('active', t.dataset.cat === cat);
+    });
+    apparelGroups.querySelectorAll('.apparel-group').forEach(g => {
+      g.classList.toggle('open', g.dataset.cat === cat);
+    });
+  }
+
+  // Category photo tiles above the catalogue panel: one "best shot" per
+  // present category, acting as tab triggers. Selection rule -- the first
+  // *active* item in that category in API order (which the backend returns
+  // sorted by sort_order ascending), i.e. byCategory[cat][0]. There's no
+  // description/metadata populated on any listing yet to score
+  // "completeness" against, so the lowest sort_order item is the simplest
+  // deterministic, non-random pick, and it matches the same ordering the
+  // panel grid below already renders in.
+  function renderApparelCategoryTiles(byCategory, presentCats){
+    if (!apparelCatTiles) return;
+    if (!presentCats.length) { apparelCatTiles.innerHTML = ''; return; }
+    apparelCatTiles.innerHTML = presentCats.map(cat => {
+      const items = byCategory[cat];
+      const hero = items[0];
+      const count = items.length;
+      const label = CATEGORY_LABEL[cat] || cat;
+      return `
+        <button type="button" class="apparel-cat-tile${cat === activeApparelCategory ? ' active' : ''}" data-cat="${cat}" aria-label="Browse ${label}" aria-selected="${cat === activeApparelCategory}">
+          <img src="${hero.image_path}" alt="${hero.name}" loading="lazy">
+          <span class="scrim"></span>
+          <span class="tile-label">
+            <span class="name">${label}</span>
+            <span class="num">${count} piece${count === 1 ? '' : 's'}</span>
+          </span>
+        </button>`;
+    }).join('');
+
+    apparelCatTiles.querySelectorAll('.apparel-cat-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const cat = tile.dataset.cat;
+        if (cat === activeApparelCategory) return; // already open, true tab -- no toggle-closed
+        setActiveApparelCategory(cat);
+      });
+    });
   }
 
   async function loadApparelFromServer(){
@@ -1302,32 +1369,24 @@
     apparelCache = items;
     if (!items.length) {
       apparelGroups.innerHTML = `<p style="color:var(--text-gray); font-size:13px;">No pieces listed yet — add your first drop from Admin Mode.</p>`;
+      if (apparelCatTiles) apparelCatTiles.innerHTML = '';
       return;
     }
     const byCategory = {};
     items.forEach(item => { (byCategory[item.category] = byCategory[item.category] || []).push(item); });
     const presentCats = CATEGORY_ORDER.filter(cat => byCategory[cat]);
 
-    if (!openApparelCategories) {
-      openApparelCategories = new Set(presentCats.length ? [presentCats[0]] : []);
+    if (!activeApparelCategory || !presentCats.includes(activeApparelCategory)) {
+      activeApparelCategory = presentCats.length ? presentCats[0] : null;
     }
 
+    renderApparelCategoryTiles(byCategory, presentCats);
+
     apparelGroups.innerHTML = presentCats.map(cat => `
-      <div class="apparel-group ${openApparelCategories.has(cat) ? 'open' : ''}" data-cat="${cat}">
-        ${renderApparelGroupHeader(cat, byCategory[cat].length)}
+      <div class="apparel-group ${cat === activeApparelCategory ? 'open' : ''}" data-cat="${cat}">
         <div class="grid">${byCategory[cat].map(renderApparelCard).join('')}</div>
       </div>
     `).join('');
-
-    apparelGroups.querySelectorAll('.apparel-group-head').forEach(head => {
-      head.addEventListener('click', () => {
-        const group = head.closest('.apparel-group');
-        const cat = group.dataset.cat;
-        const willOpen = !group.classList.contains('open');
-        group.classList.toggle('open', willOpen);
-        if (willOpen) openApparelCategories.add(cat); else openApparelCategories.delete(cat);
-      });
-    });
 
     apparelGroups.querySelectorAll('.apparel-delete').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -1732,7 +1791,7 @@
     addImagePreviewWrap.classList.remove('show'); addImagePreview.src = '';
     addName.value = ''; addPrice.value = ''; addDescription.value = '';
     addSuggestBtn.style.display = 'none'; addAiNote.style.display = 'none';
-    if (openApparelCategories) openApparelCategories.add(addCategory.value);
+    activeApparelCategory = addCategory.value;
     await loadApparelFromServer();
   });
 
