@@ -346,6 +346,7 @@
     display:flex; align-items:center; justify-content:center;
   }
   .visualizer{position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center;}
+  .track-artwork-img{display:none; position:absolute; inset:0; width:100%; height:100%; object-fit:cover; z-index:0;}
   .embed-host{display:none; width:100%; height:100%; background:#000;}
   .embed-host iframe, .embed-host blockquote{width:100%; height:100%; border:0; display:block; margin:0;}
   #mainVideo{display:none; width:100%; height:100%; object-fit:contain; background:#000;}
@@ -407,6 +408,7 @@
   }
   .upload-file-label:hover{border-color:var(--brass); color:var(--bone);}
   .upload-file-label input[type="file"]{display:none;}
+  .upload-or{text-align:center; font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#8A7B63; margin:-2px 0;}
   .upload-add .btn{width:100%; padding:12px; font-size:11px;}
   .player-list{list-style:none; max-height:230px; overflow-y:auto;}
   .player-list .platform{
@@ -420,7 +422,9 @@
   .player-list li:hover{background:#2A251C;}
   .player-list li.active{background:#2A251C; border-left:3px solid var(--rust);}
   .player-list .idx{color:#8A7B63; font-weight:800; width:18px;}
-  .player-list .meta{flex:1;}
+  .player-list .track-art{width:28px; height:28px; border-radius:2px; object-fit:cover; margin-right:8px; flex-shrink:0;}
+  .player-list .meta{flex:1; display:flex; align-items:center;}
+  .player-list .meta .meta-text{flex:1;}
   .player-list .meta .t{font-weight:700; text-transform:uppercase;}
   .player-list .meta .a{color:#B3A186; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;}
   .player-list .len{color:#8A7B63; font-size:11px;}
@@ -523,7 +527,45 @@
     text-transform:uppercase; letter-spacing:0.5px; padding:8px; cursor:pointer; margin-bottom:12px; font-family:'Inter';
   }
   .quick-view-edit-desc:hover{border-color:var(--brass); color:var(--brass);}
+  .quick-view-cat-edit{
+    display:flex; align-items:center; gap:8px; font-size:11px; text-transform:uppercase;
+    letter-spacing:0.5px; color:#B3A186; margin-bottom:12px; font-family:'Inter';
+  }
+  .quick-view-cat-edit select{
+    background:#17181d; border:1px solid #4A4030; color:var(--bone); font-size:12px;
+    padding:6px 8px; font-family:'Inter'; text-transform:none;
+  }
   .quick-view-buy{padding:14px; font-size:12px;}
+
+  .albums-admin{display:none; flex-direction:column; gap:10px; padding:14px 20px; border-bottom:1px solid #362F24;}
+  .albums-admin.show{display:flex;}
+  .albums-admin h4{color:var(--bone); font-size:14px; margin:0 0 2px; font-family:'Bodoni Moda', serif; font-weight:500;}
+  .albums-admin input[type="text"]{
+    padding:12px 14px; border-radius:4px; border:1px solid #3a3428; background:#17181d;
+    color:#f2e9d8; font-size:14px; font-family:'Inter';
+  }
+  .albums-admin .track-picker{
+    max-height:180px; overflow-y:auto; border:1px solid #3a3428; padding:10px;
+    display:flex; flex-direction:column; gap:6px; border-radius:4px;
+  }
+  .albums-admin .track-picker label{display:flex; align-items:center; gap:8px; font-size:12px; color:#B3A186; cursor:pointer;}
+  .albums-admin .track-picker-empty{color:#665c48; font-size:12px; font-style:italic;}
+  .albums-section{padding:20px; border-top:1px solid #362F24;}
+  .albums-section h3{color:var(--bone); font-size:16px; margin:0 0 16px; font-family:'Bodoni Moda', serif; font-weight:500;}
+  .albums-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(190px,1fr)); gap:16px;}
+  .album-card{background:#17181d; border:1px solid #2A251C; border-radius:6px; overflow:hidden; display:flex; flex-direction:column;}
+  .album-card img{width:100%; aspect-ratio:1; object-fit:cover; display:block; background:#000;}
+  .album-card .album-info{padding:12px; display:flex; flex-direction:column; gap:6px; flex:1;}
+  .album-card h4{color:var(--bone); font-size:14px; margin:0; font-family:'Bodoni Moda', serif; font-weight:500;}
+  .album-card .album-artist{color:#8A7B63; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;}
+  .album-card .album-meta{color:#665c48; font-size:11px;}
+  .album-card .album-price{color:var(--brass); font-weight:700; font-size:14px; margin-top:2px;}
+  .album-card .btn{margin-top:auto; padding:10px; font-size:11px;}
+  .album-card .remove-album{
+    background:transparent; border:1px solid #4A4030; color:#B3A186; font-size:10px;
+    text-transform:uppercase; letter-spacing:0.5px; padding:6px; cursor:pointer; font-family:'Inter';
+  }
+  .album-card .remove-album:hover{border-color:var(--brass); color:var(--brass);}
 
   .shop-audio-grid{display:grid; grid-template-columns:1fr; gap:16px;}
   .track-card{
@@ -758,6 +800,7 @@
           <span class="player-live"><span class="dot"></span> FIND YOUR FREQUENCY</span>
           <div class="player-screen">
             <div class="visualizer" id="visualizer">
+              <img class="track-artwork-img" id="trackArtworkImg" alt="">
               <div class="screen-title" id="screenTitle">Loading…</div>
               <div class="eq" id="eq">
                 <i style="animation-delay:0s"></i><i style="animation-delay:0.1s"></i><i style="animation-delay:0.2s"></i>
@@ -793,6 +836,15 @@
               <input type="file" id="uploadFile" accept="video/mp4,video/quicktime,video/x-m4v,video/webm">
               <span id="uploadFileName">Choose a video file…</span>
             </label>
+            <div class="upload-or">— or upload a song —</div>
+            <label class="upload-file-label">
+              <input type="file" id="uploadAudioFile" accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/x-wav,audio/x-m4a,audio/mp4">
+              <span id="uploadAudioFileName">Choose a song (audio) file…</span>
+            </label>
+            <label class="upload-file-label">
+              <input type="file" id="uploadArtworkFile" accept="image/jpeg,image/png,image/webp,image/gif">
+              <span id="uploadArtworkFileName">Choose cover art (optional, for songs)…</span>
+            </label>
             <button id="uploadBtn" class="btn btn-red" type="button">UPLOAD</button>
           </div>
           <ul class="player-list" id="playerList"></ul>
@@ -802,6 +854,26 @@
         <div class="shop-audio-grid" id="shopAudioGrid">
           <p style="color:var(--text-gray); font-size:13px;">No tracks listed yet.</p>
         </div>
+      </div>
+
+      <div class="albums-admin" id="albumsAdminPanel">
+        <h4>Create an Album — bundle songs into a purchasable collection</h4>
+        <input type="text" id="albumTitle" placeholder="Album title">
+        <input type="text" id="albumArtist" placeholder="Artist">
+        <input type="text" id="albumPrice" placeholder="Price (e.g. 9.99)">
+        <label class="upload-file-label">
+          <input type="file" id="albumCoverFile" accept="image/jpeg,image/png,image/webp,image/gif">
+          <span id="albumCoverFileName">Choose cover art…</span>
+        </label>
+        <div class="track-picker" id="albumTrackPicker">
+          <span class="track-picker-empty">No uploaded songs yet — upload songs above first.</span>
+        </div>
+        <button id="albumCreateBtn" class="btn btn-red" type="button">CREATE ALBUM</button>
+      </div>
+
+      <div class="albums-section" id="albumsSection" style="display:none;">
+        <h3>Albums</h3>
+        <div class="albums-grid" id="albumsGrid"></div>
       </div>
     </div>
   </section>
@@ -828,6 +900,14 @@
         <h3 id="quickViewName"></h3>
         <div class="quick-view-price" id="quickViewPrice"></div>
         <p class="quick-view-desc" id="quickViewDesc"></p>
+        <label class="quick-view-cat-edit" id="quickViewCatEditWrap" style="display:none;">
+          Category:
+          <select id="quickViewCatSelect">
+            <option value="tshirt">T-Shirt</option>
+            <option value="hoodie">Hoodie</option>
+            <option value="hat">Hat</option>
+          </select>
+        </label>
         <button class="quick-view-edit-desc" id="quickViewEditDesc" type="button">✎ Edit description</button>
         <button class="btn btn-red quick-view-buy" id="quickViewBuy" type="button">BUY</button>
       </div>
@@ -923,9 +1003,131 @@
   const uploadAdd    = document.getElementById('uploadAdd');
   const uploadFile   = document.getElementById('uploadFile');
   const uploadFileName = document.getElementById('uploadFileName');
+  const uploadAudioFile = document.getElementById('uploadAudioFile');
+  const uploadAudioFileName = document.getElementById('uploadAudioFileName');
+  const uploadArtworkFile = document.getElementById('uploadArtworkFile');
+  const uploadArtworkFileName = document.getElementById('uploadArtworkFileName');
   const uploadTitle  = document.getElementById('uploadTitle');
   const uploadArtist = document.getElementById('uploadArtist');
   const uploadBtn    = document.getElementById('uploadBtn');
+  const trackArtworkImg = document.getElementById('trackArtworkImg');
+
+  const albumsAdminPanel = document.getElementById('albumsAdminPanel');
+  const albumTitle = document.getElementById('albumTitle');
+  const albumArtist = document.getElementById('albumArtist');
+  const albumPrice = document.getElementById('albumPrice');
+  const albumCoverFile = document.getElementById('albumCoverFile');
+  const albumCoverFileName = document.getElementById('albumCoverFileName');
+  const albumTrackPicker = document.getElementById('albumTrackPicker');
+  const albumCreateBtn = document.getElementById('albumCreateBtn');
+  const albumsSection = document.getElementById('albumsSection');
+  const albumsGrid = document.getElementById('albumsGrid');
+  let albumsCache = [];
+
+  albumCoverFile.addEventListener('change', () => {
+    albumCoverFileName.textContent = albumCoverFile.files[0] ? albumCoverFile.files[0].name : 'Choose cover art…';
+  });
+
+  function renderAlbumTrackPicker(){
+    const songs = playlist.filter(t => t.type === 'audio');
+    if (!songs.length) {
+      albumTrackPicker.innerHTML = '<span class="track-picker-empty">No uploaded songs yet — upload songs above first.</span>';
+      return;
+    }
+    albumTrackPicker.innerHTML = songs.map(s => `
+      <label><input type="checkbox" value="${s.id}"> ${s.title} — ${s.artist}</label>
+    `).join('');
+  }
+
+  async function createAlbum(){
+    if (!isAdmin) { alert('Log in as admin to create albums.'); return; }
+    const title = albumTitle.value.trim();
+    const artist = albumArtist.value.trim();
+    const price = albumPrice.value.trim();
+    const coverFile = albumCoverFile.files[0];
+    const trackIds = Array.from(albumTrackPicker.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+    if (!title || !artist || !price) { alert('Enter a title, artist, and price.'); return; }
+    if (!coverFile) { alert('Choose cover art for the album.'); return; }
+    if (trackIds.length < 2) { alert('Pick at least 2 songs for the album.'); return; }
+
+    const original = albumCreateBtn.textContent;
+    albumCreateBtn.textContent = 'CREATING…'; albumCreateBtn.disabled = true;
+
+    const coverForm = new FormData();
+    coverForm.append('image', coverFile);
+    const coverRes = await fetch('/api/albums/cover-upload', { method: 'POST', body: coverForm });
+    if (coverRes.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); albumCreateBtn.textContent = original; albumCreateBtn.disabled = false; return; }
+    const coverData = await coverRes.json().catch(() => ({}));
+    if (!coverRes.ok) { alert(coverData.error || 'Cover upload failed.'); albumCreateBtn.textContent = original; albumCreateBtn.disabled = false; return; }
+
+    const res = await fetch('/api/albums', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, artist, price, cover_path: coverData.cover_path, track_ids: trackIds })
+    });
+    albumCreateBtn.textContent = original; albumCreateBtn.disabled = false;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || 'Could not create the album.'); return; }
+
+    albumTitle.value = ''; albumArtist.value = ''; albumPrice.value = '';
+    albumCoverFile.value = ''; albumCoverFileName.textContent = 'Choose cover art…';
+    albumTrackPicker.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+    await loadAlbumsFromServer();
+  }
+  albumCreateBtn.addEventListener('click', createAlbum);
+
+  async function buyAlbum(albumId, btn){
+    const original = btn.textContent;
+    btn.textContent = '...'; btn.disabled = true;
+    const res = await fetch('/api/checkout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [albumId] })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 501) { alert(data.error || "Checkout isn't live yet."); }
+    else if (!res.ok) { alert(data.error || 'Checkout failed — try again.'); }
+    else if (data.url) { window.location.href = data.url; return; }
+    btn.textContent = original; btn.disabled = false;
+  }
+
+  async function removeAlbum(albumId){
+    if (!confirm('Remove this album listing?')) return;
+    const res = await fetch(`/api/albums/${encodeURIComponent(albumId)}`, { method: 'DELETE' });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    if (!res.ok) { alert('Could not remove the album.'); return; }
+    await loadAlbumsFromServer();
+  }
+
+  function renderAlbums(){
+    albumsSection.style.display = (albumsCache.length || isAdmin) ? 'block' : 'none';
+    if (!albumsCache.length) {
+      albumsGrid.innerHTML = '<p style="color:var(--text-gray); font-size:13px;">No albums listed yet.</p>';
+      return;
+    }
+    albumsGrid.innerHTML = albumsCache.map(a => `
+      <div class="album-card">
+        <img src="${a.cover_path}" alt="${a.title}">
+        <div class="album-info">
+          <h4>${a.title}</h4>
+          <span class="album-artist">${a.artist}</span>
+          <span class="album-meta">${a.track_count} song${a.track_count === 1 ? '' : 's'}</span>
+          <span class="album-price">${a.price}</span>
+          <button class="btn btn-red" type="button" data-album-id="${a.id}">BUY ALBUM</button>
+          ${isAdmin ? `<button class="remove-album" type="button" data-remove-id="${a.id}">Remove listing</button>` : ''}
+        </div>
+      </div>
+    `).join('');
+    albumsGrid.querySelectorAll('[data-album-id]').forEach(btn => {
+      btn.addEventListener('click', () => buyAlbum(btn.dataset.albumId, btn));
+    });
+    albumsGrid.querySelectorAll('[data-remove-id]').forEach(btn => {
+      btn.addEventListener('click', () => removeAlbum(btn.dataset.removeId));
+    });
+  }
+
+  async function loadAlbumsFromServer(){
+    const res = await fetch('/api/albums');
+    albumsCache = res.ok ? await res.json() : [];
+    renderAlbums();
+  }
 
   const liveBanner = document.getElementById('liveBanner');
   const liveBannerTitle = document.getElementById('liveBannerTitle');
@@ -958,7 +1160,7 @@
     listEl.innerHTML = playlist.map((t,i) => `
       <li class="${i===current?'active':''}" data-idx="${i}">
         <span class="idx">${String(i+1).padStart(2,'0')}</span>
-        <span class="meta">${t.type ? `<span class="platform">${PLATFORM_LABEL[t.type] || ''}</span>` : ''}<span class="t">${t.title}</span><br><span class="a">${t.artist}</span></span>
+        <span class="meta">${t.artwork ? `<img class="track-art" src="${t.artwork}" alt="">` : ''}<span class="meta-text">${t.type ? `<span class="platform">${PLATFORM_LABEL[t.type] || ''}</span>` : ''}<span class="t">${t.title}</span><br><span class="a">${t.artist}</span></span></span>
         <span class="len">${t.len}</span>
         ${isAdmin ? `<button class="edit-track" type="button" data-idx="${i}" title="Edit title/artist">✎</button><button class="del-track" type="button" data-idx="${i}" title="Delete track">✕</button>` : ''}
       </li>`).join('');
@@ -1004,6 +1206,7 @@
       clearInterval(timer);
       embedHost.innerHTML = ''; embedHost.style.display = 'none';
       visualizer.style.display = 'flex';
+      trackArtworkImg.style.display = 'none'; eq.style.display = 'flex';
       screenTitle.textContent = 'No tracks available';
       title.textContent = '—'; artist.textContent = '—';
       bar.style.width = '0%';
@@ -1050,15 +1253,25 @@
     controlsRow.classList.toggle('embed-active', embed);
 
     if (embed) {
+      trackArtworkImg.style.display = 'none';
       embedHost.innerHTML = embedMarkup(t);
       playBtn.textContent = '⏸';
       eq.classList.remove('paused');
       playing = true;
     } else if (localVideo) {
+      trackArtworkImg.style.display = 'none';
       video.src = t.src; video.currentTime = 0;
       setPlaying(true);
     } else {
       screenTitle.innerHTML = `${t.title} <span>—</span><br>${t.artist}`;
+      if (t.artwork) {
+        trackArtworkImg.src = t.artwork;
+        trackArtworkImg.style.display = 'block';
+        eq.style.display = 'none';
+      } else {
+        trackArtworkImg.style.display = 'none';
+        eq.style.display = 'flex';
+      }
       if (t.src) { audio.src = t.src; audio.currentTime = 0; }
       setPlaying(true);
     }
@@ -1145,15 +1358,25 @@
   uploadFile.addEventListener('change', () => {
     uploadFileName.textContent = uploadFile.files[0] ? uploadFile.files[0].name : 'Choose a video file…';
   });
+  uploadAudioFile.addEventListener('change', () => {
+    uploadAudioFileName.textContent = uploadAudioFile.files[0] ? uploadAudioFile.files[0].name : 'Choose a song (audio) file…';
+  });
+  uploadArtworkFile.addEventListener('change', () => {
+    uploadArtworkFileName.textContent = uploadArtworkFile.files[0] ? uploadArtworkFile.files[0].name : 'Choose cover art (optional, for songs)…';
+  });
 
   async function uploadVideo(){
-    if (!isAdmin) { alert('Log in as admin to upload videos.'); return; }
-    const file = uploadFile.files[0];
-    if (!file) { alert('Choose a video file first.'); return; }
+    if (!isAdmin) { alert('Log in as admin to upload tracks.'); return; }
+    const videoFile = uploadFile.files[0];
+    const songFile = uploadAudioFile.files[0];
+    if (videoFile && songFile) { alert('Choose either a video file or a song file, not both.'); return; }
+    if (!videoFile && !songFile) { alert('Choose a video or song file first.'); return; }
     const original = uploadBtn.textContent;
     uploadBtn.textContent = 'UPLOADING…'; uploadBtn.disabled = true;
     const form = new FormData();
-    form.append('video', file);
+    if (videoFile) form.append('video', videoFile);
+    if (songFile) form.append('audio', songFile);
+    if (songFile && uploadArtworkFile.files[0]) form.append('artwork', uploadArtworkFile.files[0]);
     if (uploadTitle.value.trim()) form.append('title', uploadTitle.value.trim());
     if (uploadArtist.value.trim()) form.append('artist', uploadArtist.value.trim());
     const res = await fetch('/api/tracks/upload', { method: 'POST', body: form });
@@ -1162,6 +1385,8 @@
     const data = await res.json().catch(() => ({}));
     if (!res.ok) { alert(data.error || 'Upload failed — try again.'); return; }
     uploadFile.value = ''; uploadFileName.textContent = 'Choose a video file…';
+    uploadAudioFile.value = ''; uploadAudioFileName.textContent = 'Choose a song (audio) file…';
+    uploadArtworkFile.value = ''; uploadArtworkFileName.textContent = 'Choose cover art (optional, for songs)…';
     uploadTitle.value = ''; uploadArtist.value = '';
     await loadTracksFromServer();
     loadTrack(playlist.length - 1);
@@ -1172,6 +1397,7 @@
     const res = await fetch('/api/tracks');
     playlist = res.ok ? await res.json() : [];
     renderList();
+    renderAlbumTrackPicker();
   }
 
   function wirePriceEdits(root){
@@ -1432,6 +1658,8 @@
   const quickViewPrice = document.getElementById('quickViewPrice');
   const quickViewDesc = document.getElementById('quickViewDesc');
   const quickViewEditDesc = document.getElementById('quickViewEditDesc');
+  const quickViewCatEditWrap = document.getElementById('quickViewCatEditWrap');
+  const quickViewCatSelect = document.getElementById('quickViewCatSelect');
   const quickViewBuy = document.getElementById('quickViewBuy');
   const quickViewClose = document.getElementById('quickViewClose');
   let quickViewItem = null;
@@ -1451,6 +1679,8 @@
     quickViewPrice.textContent = item.price;
     quickViewDesc.textContent = item.description || '';
     quickViewEditDesc.style.display = isAdmin ? 'block' : 'none';
+    quickViewCatEditWrap.style.display = isAdmin ? 'flex' : 'none';
+    quickViewCatSelect.value = item.category;
     quickViewBuy.dataset.productId = item.id;
     quickViewOverlay.classList.add('open');
   }
@@ -1473,6 +1703,23 @@
     quickViewDesc.textContent = quickViewItem.description;
     const cached = apparelCache.find(a => a.id === quickViewItem.id);
     if (cached) cached.description = quickViewItem.description;
+  });
+
+  quickViewCatSelect.addEventListener('change', async () => {
+    if (!quickViewItem) return;
+    const newCategory = quickViewCatSelect.value;
+    const previous = quickViewItem.category;
+    const res = await fetch(`/api/apparel/${encodeURIComponent(quickViewItem.id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: newCategory })
+    });
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); quickViewCatSelect.value = previous; return; }
+    if (!res.ok) { alert('Could not update the category.'); quickViewCatSelect.value = previous; return; }
+    quickViewItem.category = newCategory;
+    const cached = apparelCache.find(a => a.id === quickViewItem.id);
+    if (cached) cached.category = newCategory;
+    closeQuickView();
+    await loadApparelFromServer();
   });
 
   const STATUS_LABEL = { live: 'LIVE', scheduled: 'SCHEDULED', ended: 'ENDED' };
@@ -1596,6 +1843,7 @@
     shopSection.classList.toggle('admin-mode', on);
     apparelGroups.classList.toggle('admin-mode', on);
     uploadAdd.classList.toggle('show', on);
+    albumsAdminPanel.classList.toggle('show', on);
     analyticsLink.style.display = on ? 'inline-block' : 'none';
     adminToggles.forEach(btn => {
       btn.classList.toggle('active', on);
@@ -1605,6 +1853,7 @@
     loadProductsFromServer();
     loadApparelFromServer();
     loadLiveFromServer();
+    loadAlbumsFromServer();
     refreshAiStatus();
   }
 

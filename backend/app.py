@@ -2,6 +2,7 @@ from gevent import monkey
 monkey.patch_all()
 
 import base64
+import io
 import ipaddress
 import json
 import os
@@ -11,6 +12,7 @@ import subprocess
 import time
 import secrets
 import uuid
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +20,7 @@ import anthropic
 import requests
 import stripe
 from dotenv import load_dotenv
-from flask import Flask, g, jsonify, render_template, request, session, send_from_directory
+from flask import Flask, g, jsonify, render_template, request, session, send_from_directory, send_file
 from flask_socketio import SocketIO, join_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -68,8 +70,21 @@ VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(exist_ok=True)
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "m4v", "webm"}
 
+AUDIO_DIR = DATA_DIR / "audio"
+AUDIO_DIR.mkdir(exist_ok=True)
+ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "m4a"}
+MAX_AUDIO_BYTES = 60 * 1024 * 1024  # generous for a full song at a reasonable bitrate;
+                                    # still well under the global 300MB request cap.
+_AUDIO_EXT_TO_KIND = {"mp3": "mp3", "wav": "wav", "m4a": "m4a"}
+
+ARTWORK_DIR = SITE_DIR / "images" / "artwork"
+ARTWORK_DIR.mkdir(parents=True, exist_ok=True)
+
 APPAREL_DIR = SITE_DIR / "images" / "apparel"
 APPAREL_DIR.mkdir(parents=True, exist_ok=True)
+
+ALBUMS_DIR = SITE_DIR / "images" / "albums"
+ALBUMS_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB is plenty for a product photo; keeps this endpoint
                                     # from doubling as a general-purpose large-file upload.
@@ -112,6 +127,42 @@ def _read_and_validate_image(file):
     if not kind or kind != _EXT_TO_KIND.get(ext):
         return None, None, (jsonify({"error": "That file doesn't look like a valid image."}), 400)
     return data, _KIND_TO_MEDIA_TYPE[kind], None
+
+
+def _sniff_audio_kind(header):
+    """Cheap magic-byte check for uploaded audio -- mirrors _sniff_image_kind's rigor
+    (a client-supplied extension/Content-Type can't be trusted on its own)."""
+    if header[:3] == b"ID3":
+        return "mp3"
+    if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
+        return "mp3"  # MPEG audio frame sync, no ID3 tag present
+    if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+        return "wav"
+    if header[4:8] == b"ftyp":
+        return "m4a"  # ISO base media container box, used by m4a/mp4 family files
+    return None
+
+
+def _read_and_validate_audio(file):
+    """Validates an uploaded song file (extension + size + magic-byte sniff),
+    mirroring _read_and_validate_image's rigor for a different media type.
+    Returns (bytes, None) on success, or (None, (response, status)) on failure."""
+    if not file or not file.filename:
+        return None, (jsonify({"error": "No audio file uploaded."}), 400)
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        return None, (jsonify({
+            "error": f"Unsupported file type .{ext}. Allowed: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}"
+        }), 400)
+    data = file.read()
+    if len(data) > MAX_AUDIO_BYTES:
+        return None, (jsonify({
+            "error": f"That audio file is too large ({MAX_AUDIO_BYTES // (1024*1024)}MB limit)."
+        }), 413)
+    kind = _sniff_audio_kind(data[:16])
+    if not kind or kind != _AUDIO_EXT_TO_KIND.get(ext):
+        return None, (jsonify({"error": "That file doesn't look like a valid audio file."}), 400)
+    return data, None
 
 _login_attempts = {}
 MAX_ATTEMPTS = 5
@@ -202,6 +253,7 @@ def init_db():
             type TEXT,
             embed_id TEXT,
             embed_url TEXT,
+            artwork TEXT,
             sort_order INTEGER NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
         );
@@ -320,15 +372,57 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL DEFAULT ''
         );
+
+        -- A purchasable bundle of existing uploaded tracks (any track with a real
+        -- local file -- tracks.src under audio/ or videos/; embed-only
+        -- YouTube/TikTok/Apple links have no downloadable file so can't be
+        -- bundled). Albums
+        -- never duplicate or move the underlying track rows -- see album_tracks,
+        -- a join table, so one song could in principle belong to more than one
+        -- album and deleting an album never touches the tracks table.
+        CREATE TABLE IF NOT EXISTS albums (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            price TEXT NOT NULL,
+            price_cents INTEGER NOT NULL DEFAULT 0,
+            cover_path TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS album_tracks (
+            album_id TEXT NOT NULL REFERENCES albums(id),
+            track_id TEXT NOT NULL REFERENCES tracks(id),
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (album_id, track_id)
+        );
         """
     )
     conn.commit()
+
+    # Safe idempotent migration: orders predates album purchases, which need a
+    # per-order secret so the post-purchase success page can hand back a
+    # download link that can't be guessed from the order id alone.
+    existing_order_cols = {row["name"] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+    if "download_token" not in existing_order_cols:
+        conn.execute("ALTER TABLE orders ADD COLUMN download_token TEXT")
+        conn.commit()
 
     # Safe idempotent migration: apparel predates having a description field,
     # so existing databases need it added rather than recreated.
     existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(apparel)").fetchall()}
     if "description" not in existing_cols:
         conn.execute("ALTER TABLE apparel ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+    # Safe idempotent migration: tracks predates song-with-artwork uploads, so
+    # existing databases need the column added rather than recreated. Nullable --
+    # existing video/embed tracks are unaffected and just have no artwork.
+    existing_track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+    if "artwork" not in existing_track_cols:
+        conn.execute("ALTER TABLE tracks ADD COLUMN artwork TEXT")
         conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0] == 0:
@@ -597,16 +691,21 @@ def list_tracks():
 @login_required
 def delete_track(track_id):
     conn = get_db()
-    row = conn.execute("SELECT src FROM tracks WHERE id = ?", (track_id,)).fetchone()
+    row = conn.execute("SELECT src, artwork FROM tracks WHERE id = ?", (track_id,)).fetchone()
     conn.execute("UPDATE tracks SET active = 0 WHERE id = ?", (track_id,))
     conn.commit()
     conn.close()
-    # Uploaded videos are stored under unique-per-upload filenames, so it's safe to
-    # remove the file from disk once its track is delisted — nothing else references it.
-    # (Soft-delete only flips `active`; without this the persistent disk fills up with
-    # orphaned video files from every replaced/removed upload.)
-    if row and row["src"] and row["src"].startswith("videos/"):
-        _delete_video_file_if_unreferenced(row["src"])
+    # Uploaded videos/songs/artwork are stored under unique-per-upload filenames, so
+    # it's safe to remove the file from disk once its track is delisted — nothing else
+    # references it. (Soft-delete only flips `active`; without this the persistent
+    # disk fills up with orphaned files from every replaced/removed upload.)
+    if row and row["src"]:
+        if row["src"].startswith("videos/"):
+            _delete_video_file_if_unreferenced(row["src"])
+        elif row["src"].startswith("audio/"):
+            _delete_track_file_if_unreferenced("src", row["src"], AUDIO_DIR)
+    if row and row["artwork"] and row["artwork"].startswith("images/artwork/"):
+        _delete_track_file_if_unreferenced("artwork", row["artwork"], ARTWORK_DIR)
     return jsonify({"ok": True})
 
 
@@ -648,6 +747,29 @@ def _delete_video_file_if_unreferenced(src):
         return
     filename = src.split("/", 1)[-1]
     path = VIDEOS_DIR / filename
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _delete_track_file_if_unreferenced(column, value, base_dir):
+    """Generic version of _delete_video_file_if_unreferenced, for the newer
+    audio (`src`, under audio/) and artwork (`artwork`, under images/artwork/)
+    uploads -- same "only remove if no active track still points at it" logic."""
+    if not value:
+        return
+    conn = get_db()
+    still_used = conn.execute(
+        f"SELECT COUNT(*) FROM tracks WHERE {column} = ? AND active = 1", (value,)
+    ).fetchone()[0]
+    conn.close()
+    if still_used:
+        return
+    filename = value.rsplit("/", 1)[-1]  # last path segment -- value may be "videos/x"
+                                          # or the two-level "images/artwork/x"
+    path = base_dir / filename
     try:
         if path.is_file():
             path.unlink()
@@ -702,41 +824,101 @@ def _format_len(seconds):
 @app.post("/api/tracks/upload")
 @login_required
 def upload_track():
-    file = request.files.get("video")
-    if not file or not file.filename:
-        return jsonify({"error": "No file uploaded."}), 400
+    """Uploads a track either as a local video file (multipart field 'video', the
+    original behavior) or as a song/audio file (multipart field 'audio'), optionally
+    paired with cover art (multipart field 'artwork', image only -- validated the same
+    way as /api/apparel/upload-image). Exactly one of video/audio is required."""
+    video_file = request.files.get("video")
+    audio_file = request.files.get("audio")
+    has_video = bool(video_file and video_file.filename)
+    has_audio = bool(audio_file and audio_file.filename)
 
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if ext not in ALLOWED_VIDEO_EXTENSIONS:
-        return jsonify({"error": f"Unsupported file type .{ext}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}"}), 400
+    if has_video and has_audio:
+        return jsonify({"error": "Upload either a video file or a song file, not both."}), 400
+    if not has_video and not has_audio:
+        return jsonify({"error": "No audio or video file uploaded."}), 400
 
-    base_name = secure_filename(file.filename.rsplit(".", 1)[0]) or "video"
-    filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
-    dest = VIDEOS_DIR / filename
-    try:
-        file.save(dest)
-    except OSError as e:
-        # e.g. errno 28 "No space left on device" if the persistent disk is full.
-        dest.unlink(missing_ok=True)
-        return jsonify({
-            "error": "Upload failed: the server ran out of storage space. "
-                     "An admin needs to free up disk space (delete old videos) or increase the disk size."
-        }), 507
+    artwork_path = None
+    artwork_file = request.files.get("artwork")
+    if artwork_file and artwork_file.filename:
+        art_data, _media_type, err = _read_and_validate_image(artwork_file)
+        if err:
+            response, status = err
+            return response, status
+        art_ext = artwork_file.filename.rsplit(".", 1)[-1].lower()
+        art_base = secure_filename(artwork_file.filename.rsplit(".", 1)[0]) or "artwork"
+        art_filename = f"{art_base}-{secrets.token_hex(4)}.{art_ext}"
+        art_dest = ARTWORK_DIR / art_filename
+        try:
+            art_dest.write_bytes(art_data)
+        except OSError:
+            art_dest.unlink(missing_ok=True)
+            return jsonify({
+                "error": "Upload failed: the server ran out of storage space. "
+                         "An admin needs to free up disk space or increase the disk size."
+            }), 507
+        artwork_path = f"images/artwork/{art_filename}"
 
-    seconds = _video_duration_seconds(dest)
+    if has_video:
+        ext = video_file.filename.rsplit(".", 1)[-1].lower() if "." in video_file.filename else ""
+        if ext not in ALLOWED_VIDEO_EXTENSIONS:
+            return jsonify({"error": f"Unsupported file type .{ext}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}"}), 400
+
+        base_name = secure_filename(video_file.filename.rsplit(".", 1)[0]) or "video"
+        filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
+        dest = VIDEOS_DIR / filename
+        try:
+            video_file.save(dest)
+        except OSError:
+            # e.g. errno 28 "No space left on device" if the persistent disk is full.
+            dest.unlink(missing_ok=True)
+            return jsonify({
+                "error": "Upload failed: the server ran out of storage space. "
+                         "An admin needs to free up disk space (delete old videos) or increase the disk size."
+            }), 507
+
+        seconds = _video_duration_seconds(dest)
+        track_type = "video"
+        src = f"videos/{filename}"
+        id_prefix = "video"
+    else:
+        data, err = _read_and_validate_audio(audio_file)
+        if err:
+            response, status = err
+            return response, status
+
+        ext = audio_file.filename.rsplit(".", 1)[-1].lower()
+        base_name = secure_filename(audio_file.filename.rsplit(".", 1)[0]) or "song"
+        filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
+        dest = AUDIO_DIR / filename
+        try:
+            dest.write_bytes(data)
+        except OSError:
+            dest.unlink(missing_ok=True)
+            return jsonify({
+                "error": "Upload failed: the server ran out of storage space. "
+                         "An admin needs to free up disk space (delete old songs) or increase the disk size."
+            }), 507
+
+        seconds = _video_duration_seconds(dest)  # mdls reads duration metadata for audio too
+        track_type = "audio"
+        src = f"audio/{filename}"
+        id_prefix = "song"
+
     title = (request.form.get("title") or base_name.replace("-", " ").replace("_", " ").title()).strip()
     artist = (request.form.get("artist") or "Msanii Halisi").strip()
 
     conn = get_db()
     next_order = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM tracks").fetchone()[0]
-    new_id = f"video-{secrets.token_hex(4)}"
+    new_id = f"{id_prefix}-{secrets.token_hex(4)}"
     conn.execute(
-        "INSERT INTO tracks (id, title, artist, len, seconds, src, type, sort_order) VALUES (?,?,?,?,?,?,?,?)",
-        (new_id, title, artist, _format_len(seconds), int(seconds), f"videos/{filename}", "video", next_order),
+        "INSERT INTO tracks (id, title, artist, len, seconds, src, type, artwork, sort_order) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (new_id, title, artist, _format_len(seconds), int(seconds), src, track_type, artwork_path, next_order),
     )
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "id": new_id, "title": title, "artist": artist})
+    return jsonify({"ok": True, "id": new_id, "title": title, "artist": artist, "artwork": artwork_path})
 
 
 @app.errorhandler(413)
@@ -997,21 +1179,59 @@ def live_room(room_code):
     return render_template("live_room.html", live_session=live_session)
 
 
-@app.post("/live/<room_code>/upload-recording")
+LIVE_RECORDING_TMP_DIR = DATA_DIR / "live_recording_tmp"
+LIVE_RECORDING_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _live_recording_tmp_path(room_code):
+    # room_code is per-session (never reused), so it alone is a safe unique key.
+    safe = secure_filename(room_code) or "room"
+    return LIVE_RECORDING_TMP_DIR / f"{safe}.webm.part"
+
+
+@app.post("/live/<room_code>/upload-chunk")
 @login_required
-def upload_recording(room_code):
+def upload_recording_chunk(room_code):
+    # The old design buffered the ENTIRE recording in the browser's memory and
+    # uploaded it as one giant request only at the end of the live session --
+    # which silently lost real footage in production: a long session's blob
+    # exceeded MAX_CONTENT_LENGTH (or just hit a network hiccup) on that one
+    # all-or-nothing upload, the connection was cut, fetch() threw, and there
+    # was nothing recoverable server-side (not even a partial file) once the
+    # browser tab closed. Fixed by uploading each ~1s MediaRecorder chunk to
+    # disk as it's produced (appended in order to one growing .part file) --
+    # a single dropped chunk-sized request can be retried or simply costs a
+    # second of footage, never the whole session, and most of the recording
+    # is already safely on disk well before "end live" is ever clicked.
     live_session = get_live_session_by_room(room_code)
     if not live_session:
         return jsonify({"error": "Live session not found."}), 404
-    file = request.files.get("recording")
-    if not file:
-        return jsonify({"error": "no file"}), 400
+    chunk = request.files.get("chunk")
+    if not chunk:
+        return jsonify({"error": "no chunk"}), 400
+    dest = _live_recording_tmp_path(room_code)
+    try:
+        with open(dest, "ab") as f:
+            f.write(chunk.read())
+    except OSError:
+        return jsonify({"error": "Upload failed: the server ran out of storage space."}), 507
+    return jsonify({"ok": True})
+
+
+@app.post("/live/<room_code>/finalize-recording")
+@login_required
+def finalize_recording(room_code):
+    live_session = get_live_session_by_room(room_code)
+    if not live_session:
+        return jsonify({"error": "Live session not found."}), 404
+    tmp_path = _live_recording_tmp_path(room_code)
+    if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+        return jsonify({"error": "No recorded chunks were received."}), 400
     filename = f"live-{room_code}-{secrets.token_hex(4)}.webm"
     dest = VIDEOS_DIR / filename
     try:
-        file.save(dest)
+        tmp_path.rename(dest)
     except OSError:
-        dest.unlink(missing_ok=True)
         return jsonify({"error": "Upload failed: the server ran out of storage space."}), 507
     rel_path = f"videos/{filename}"
     set_live_recording(live_session["id"], rel_path)
@@ -1311,6 +1531,13 @@ def edit_apparel(item_id):
     if "description" in data:
         fields.append("description = ?")
         values.append((data.get("description") or "").strip())
+    if "category" in data:
+        category = (data.get("category") or "").strip().lower()
+        if category not in ("tshirt", "hoodie", "hat"):
+            conn.close()
+            return jsonify({"error": "category must be tshirt, hoodie, or hat."}), 400
+        fields.append("category = ?")
+        values.append(category)
     if not fields:
         conn.close()
         return jsonify({"error": "Nothing to update."}), 400
@@ -1348,6 +1575,203 @@ def update_apparel_price(item_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "price": display, "price_cents": cents})
+
+
+#   Albums -- purchasable bundles of 2+ already-uploaded songs (tracks.type
+#   == 'audio'). See the albums/album_tracks tables in init_db() above.
+# ==================================================================
+
+MIN_ALBUM_TRACKS = 2
+
+
+def _album_track_rows(album_id):
+    """Every track belonging to an album, in the order picked when the album
+    was created. Deliberately not filtered on tracks.active -- an album's
+    track list is a point-in-time curation decision by the admin, not a live
+    view of the storefront catalogue, so delisting a song from the main
+    player list later shouldn't silently shrink an album someone already
+    bought."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT t.* FROM album_tracks at
+           JOIN tracks t ON t.id = at.track_id
+           WHERE at.album_id = ?
+           ORDER BY at.sort_order ASC""",
+        (album_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+@app.post("/api/albums/cover-upload")
+@login_required
+def upload_album_cover():
+    """Uploads cover art for a new album and returns the relative path to hand
+    to POST /api/albums as cover_path. Mirrors /api/apparel/upload-image."""
+    file = request.files.get("image")
+    data, _media_type, err = _read_and_validate_image(file)
+    if err:
+        response, status = err
+        return response, status
+
+    ext = file.filename.rsplit(".", 1)[-1].lower()
+    base_name = secure_filename(file.filename.rsplit(".", 1)[0]) or "album"
+    filename = f"{base_name}-{secrets.token_hex(4)}.{ext}"
+    dest = ALBUMS_DIR / filename
+    try:
+        dest.write_bytes(data)
+    except OSError:
+        dest.unlink(missing_ok=True)
+        return jsonify({
+            "error": "Upload failed: the server ran out of storage space. "
+                     "An admin needs to free up disk space or increase the disk size."
+        }), 507
+
+    return jsonify({"ok": True, "cover_path": f"images/albums/{filename}"})
+
+
+@app.get("/api/albums")
+def list_albums():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM albums WHERE active = 1 ORDER BY sort_order ASC").fetchall()
+    conn.close()
+    albums = []
+    for row in rows:
+        tracks = _album_track_rows(row["id"])
+        album = dict(row)
+        album["tracks"] = [
+            {"id": t["id"], "title": t["title"], "artist": t["artist"], "len": t["len"]}
+            for t in tracks
+        ]
+        album["track_count"] = len(tracks)
+        albums.append(album)
+    return jsonify(albums)
+
+
+@app.post("/api/albums")
+@login_required
+def add_album():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    artist = (data.get("artist") or "").strip()
+    cover_path = (data.get("cover_path") or "").strip()
+    track_ids = data.get("track_ids") or []
+    if not title or not artist or not cover_path:
+        return jsonify({"error": "title, artist, and cover_path are required."}), 400
+    if not isinstance(track_ids, list) or len(track_ids) < MIN_ALBUM_TRACKS:
+        return jsonify({"error": f"Pick at least {MIN_ALBUM_TRACKS} songs for the album."}), 400
+    cents = parse_price_to_cents(data.get("price", "0"))
+    if cents is None:
+        return jsonify({"error": "Enter a valid, non-negative price."}), 400
+
+    conn = get_db()
+    placeholders = ",".join("?" for _ in track_ids)
+    found = conn.execute(
+        f"SELECT id FROM tracks WHERE id IN ({placeholders}) "
+        f"AND (src LIKE 'audio/%' OR src LIKE 'videos/%')", track_ids
+    ).fetchall()
+    found_ids = {r["id"] for r in found}
+    missing = [t for t in track_ids if t not in found_ids]
+    if missing:
+        conn.close()
+        return jsonify({
+            "error": "One or more selected tracks couldn't be found (albums can only be built from "
+                     "already-uploaded local audio/video files, not embedded links): " + ", ".join(missing)
+        }), 400
+
+    next_order = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM albums").fetchone()[0]
+    new_id = f"album-{secrets.token_hex(4)}"
+    conn.execute(
+        "INSERT INTO albums (id, title, artist, price, price_cents, cover_path, sort_order) VALUES (?,?,?,?,?,?,?)",
+        (new_id, title, artist, f"${cents / 100:,.2f}", cents, cover_path, next_order),
+    )
+    for i, track_id in enumerate(track_ids):
+        conn.execute(
+            "INSERT INTO album_tracks (album_id, track_id, sort_order) VALUES (?,?,?)",
+            (new_id, track_id, i),
+        )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "id": new_id})
+
+
+@app.patch("/api/albums/<album_id>/price")
+@login_required
+def update_album_price(album_id):
+    data = request.get_json(silent=True) or {}
+    cents = parse_price_to_cents(data.get("price"))
+    if cents is None:
+        return jsonify({"error": "Enter a valid, non-negative price."}), 400
+    conn = get_db()
+    row = conn.execute("SELECT id FROM albums WHERE id = ?", (album_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Album not found."}), 404
+    display = f"${cents / 100:,.2f}"
+    conn.execute("UPDATE albums SET price = ?, price_cents = ? WHERE id = ?", (display, cents, album_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "price": display, "price_cents": cents})
+
+
+@app.delete("/api/albums/<album_id>")
+@login_required
+def delete_album(album_id):
+    conn = get_db()
+    conn.execute("UPDATE albums SET active = 0 WHERE id = ?", (album_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+def _build_album_zip(album_id):
+    """Returns (BytesIO, album_row) with a zip of every track's local media
+    file in the album (audio/ or videos/ uploads -- embed-only tracks have no
+    downloadable file and are skipped), or (None, album_row/None) if the
+    album or none of its files can be found on disk."""
+    conn = get_db()
+    album = conn.execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
+    conn.close()
+    if not album:
+        return None, None
+    tracks = _album_track_rows(album_id)
+
+    buf = io.BytesIO()
+    included = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, t in enumerate(tracks, start=1):
+            src = t["src"] or ""
+            if src.startswith("audio/"):
+                base_dir = AUDIO_DIR
+            elif src.startswith("videos/"):
+                base_dir = VIDEOS_DIR
+            else:
+                continue
+            path = base_dir / src.split("/", 1)[-1]
+            if not path.is_file():
+                continue
+            ext = path.suffix
+            safe_title = re.sub(r'[\\/:*?"<>|]', "-", t["title"]) or t["id"]
+            zf.writestr(f"{i:02d} - {safe_title}{ext}", path.read_bytes())
+            included += 1
+    if included == 0:
+        return None, album
+    buf.seek(0)
+    return buf, album
+
+
+@app.get("/api/albums/<album_id>/download")
+@login_required
+def admin_download_album(album_id):
+    """Admin-only: download the zip an album's buyer would receive, for
+    previewing/testing the bundle without needing a real Stripe purchase."""
+    buf, album = _build_album_zip(album_id)
+    if not album:
+        return jsonify({"error": "Album not found."}), 404
+    if not buf:
+        return jsonify({"error": "None of this album's songs have an audio file on disk."}), 404
+    safe_title = re.sub(r'[\\/:*?"<>|]', "-", album["title"]) or album_id
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"{safe_title}.zip")
 
 
 @app.get("/api/settings/marquee")
@@ -1430,8 +1854,10 @@ def create_checkout_session():
         SELECT id, name, price_cents, is_physical FROM products WHERE id IN ({placeholders}) AND active = 1
         UNION ALL
         SELECT id, name, price_cents, 1 AS is_physical FROM apparel WHERE id IN ({placeholders}) AND active = 1
+        UNION ALL
+        SELECT id, title AS name, price_cents, 0 AS is_physical FROM albums WHERE id IN ({placeholders}) AND active = 1
         """,
-        item_ids + item_ids,
+        item_ids + item_ids + item_ids,
     ).fetchall()
     conn.close()
 
@@ -1448,7 +1874,13 @@ def create_checkout_session():
     site_url = request.host_url.rstrip("/")
     session_kwargs = dict(
         mode="payment", line_items=line_items,
-        success_url=f"{site_url}/?checkout=success", cancel_url=f"{site_url}/?checkout=cancelled",
+        # {CHECKOUT_SESSION_ID} is a Stripe-reserved placeholder it substitutes
+        # on redirect -- the success page uses it to ask
+        # GET /api/orders/by-session/<id> for any digital (album) download
+        # links, since purchases are confirmed server-side via webhook, not
+        # trusted from the client redirect alone.
+        success_url=f"{site_url}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{site_url}/?checkout=cancelled",
     )
     if needs_shipping:
         session_kwargs["shipping_address_collection"] = {"allowed_countries": ["US"]}
@@ -1484,11 +1916,17 @@ def stripe_webhook():
         obj = event["data"]["object"]
         conn = get_db()
         shipping_details = obj.get("shipping_details") or {}
+        # A per-order secret, generated only once a webhook has actually confirmed
+        # payment -- this is what lets the success page hand back an album
+        # download link that can't be guessed from the order id alone (see
+        # /api/orders/by-session/<id> and /api/orders/<id>/download/<album_id>).
+        download_token = secrets.token_urlsafe(24)
         conn.execute(
             """UPDATE orders SET status = 'paid', customer_email = ?,
-               shipping_name = ?, shipping_address = ? WHERE stripe_session_id = ?""",
+               shipping_name = ?, shipping_address = ?, download_token = ? WHERE stripe_session_id = ?""",
             (obj.get("customer_details", {}).get("email"), shipping_details.get("name"),
-             json.dumps(shipping_details.get("address")) if shipping_details.get("address") else None, obj["id"]),
+             json.dumps(shipping_details.get("address")) if shipping_details.get("address") else None,
+             download_token, obj["id"]),
         )
         # Log a 'purchase' analytics event per line item -- this is the strongest
         # per-item performance signal (view -> checkout-start -> purchase), and it's
@@ -1506,8 +1944,9 @@ def stripe_webhook():
                 item_ids = []
             for item_id in item_ids:
                 label_row = conn.execute(
-                    "SELECT name FROM apparel WHERE id = ? UNION ALL SELECT name FROM products WHERE id = ?",
-                    (item_id, item_id),
+                    "SELECT name FROM apparel WHERE id = ? UNION ALL SELECT name FROM products WHERE id = ? "
+                    "UNION ALL SELECT title AS name FROM albums WHERE id = ?",
+                    (item_id, item_id, item_id),
                 ).fetchone()
                 item_label = label_row["name"] if label_row else item_id
                 conn.execute(
@@ -1527,6 +1966,79 @@ def list_orders():
     rows = conn.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/orders/by-session/<stripe_session_id>")
+def order_by_session(stripe_session_id):
+    """Public (no login) lookup used by the checkout success page -- Stripe
+    redirects the buyer here with their own session id, which is the only
+    thing proving they're the one who just paid. Returns any purchased
+    albums' download links once the webhook has marked the order 'paid';
+    before that (webhook lag, or Stripe not configured) it reports 'pending'
+    so the success page can say "hang tight" instead of erroring."""
+    conn = get_db()
+    order = conn.execute(
+        "SELECT * FROM orders WHERE stripe_session_id = ?", (stripe_session_id,)
+    ).fetchone()
+    if not order:
+        conn.close()
+        return jsonify({"error": "Order not found."}), 404
+
+    albums = []
+    if order["status"] == "paid" and order["download_token"]:
+        try:
+            item_ids = json.loads(order["items"] or "[]")
+        except (TypeError, ValueError):
+            item_ids = []
+        if item_ids:
+            placeholders = ",".join("?" for _ in item_ids)
+            album_rows = conn.execute(
+                f"SELECT id, title, artist, cover_path FROM albums WHERE id IN ({placeholders})", item_ids
+            ).fetchall()
+            albums = [
+                {
+                    "id": a["id"], "title": a["title"], "artist": a["artist"], "cover_path": a["cover_path"],
+                    "download_url": f"/api/orders/{order['id']}/download/{a['id']}?token={order['download_token']}",
+                }
+                for a in album_rows
+            ]
+    conn.close()
+    return jsonify({"status": order["status"], "albums": albums})
+
+
+@app.get("/api/orders/<order_id>/download/<album_id>")
+def order_download_album(order_id, album_id):
+    """Token-gated digital delivery: proves the requester actually paid for
+    this specific order (the token is only ever generated server-side, by the
+    Stripe webhook, once payment is confirmed -- see stripe_webhook()) before
+    streaming the album's zip. An already-authenticated admin can also use
+    this without a token, for support/testing."""
+    conn = get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    if not order:
+        return jsonify({"error": "Order not found."}), 404
+
+    is_admin = bool(session.get("admin_id"))
+    token = request.args.get("token", "")
+    if not is_admin:
+        if order["status"] != "paid" or not order["download_token"] or not secrets.compare_digest(token, order["download_token"]):
+            return jsonify({"error": "Invalid or expired download link."}), 403
+
+    try:
+        item_ids = json.loads(order["items"] or "[]")
+    except (TypeError, ValueError):
+        item_ids = []
+    if album_id not in item_ids:
+        return jsonify({"error": "That album isn't part of this order."}), 404
+
+    buf, album = _build_album_zip(album_id)
+    if not album:
+        return jsonify({"error": "Album not found."}), 404
+    if not buf:
+        return jsonify({"error": "None of this album's songs have an audio file on disk."}), 404
+    safe_title = re.sub(r'[\\/:*?"<>|]', "-", album["title"]) or album_id
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"{safe_title}.zip")
 
 
 @app.get("/api/orders/<order_id>/shipping-rates")

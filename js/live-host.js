@@ -22,6 +22,12 @@
   const statusBadge = document.getElementById("status-badge");
   const switchCameraBtn = document.getElementById("switch-camera-btn");
   const filterSelect = document.getElementById("filter-select");
+  const cameraSourceBtn = document.getElementById("camera-source-btn");
+  const screenShareBtn = document.getElementById("screen-share-btn");
+  const videoFileBtn = document.getElementById("video-file-btn");
+  const videoFileInput = document.getElementById("video-file-input");
+  const screenSharePreview = document.getElementById("screen-share-preview");
+  const videoFilePlayer = document.getElementById("video-file-player");
 
   // Filters used to be applied via ctx.filter = "<css filter string>" at
   // draw time. That property is unreliable on WebKit/iOS Safari -- multi-
@@ -127,7 +133,27 @@
   const viewerConnections = {}; // sid -> RTCPeerConnection (host is offerer, broadcasting finalStream)
   let mediaRecorder = null;
   let recordedChunks = [];
+  let chunkUploadQueue = Promise.resolve();
+  let chunkUploadFailures = 0;
   let isLive = false;
+
+  // Retries so one dropped request (brief network blip) costs nothing --
+  // it's a ~1s chunk, not the whole session. Giving up after retries still
+  // only loses that one chunk; everything else already uploaded is safe.
+  async function uploadChunk(blob, attempt = 1) {
+    const form = new FormData();
+    form.append("chunk", blob, "chunk.webm");
+    try {
+      const res = await fetch(`/live/${ROOM}/upload-chunk`, { method: "POST", body: form });
+      if (!res.ok) throw new Error("chunk upload failed: " + res.status);
+    } catch (e) {
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 500 * attempt));
+        return uploadChunk(blob, attempt + 1);
+      }
+      chunkUploadFailures++;
+    }
+  }
 
   function appendChatLine(name, message) {
     const div = document.createElement("div");
@@ -194,6 +220,197 @@
     filterSelect.onchange = () => { currentFilter = filterSelect.value; };
   }
 
+  // ---------------- Main broadcast source: camera / screen share / video file ----------------
+  // Whichever of these is "active" supplies tile 0 of the composited grid
+  // (see drawLoop below) -- guest cameras still tile on top of it exactly as
+  // they do over the plain camera, since tile 0 is just swapped out, nothing
+  // else about the compositing loop changes. Because viewers only ever
+  // receive the CANVAS's captured stream (same fact switchCamera() above
+  // relies on), none of this needs any RTCPeerConnection renegotiation --
+  // swapping the source is purely local to the draw loop.
+  let activeMainSource = "camera"; // "camera" | "screen" | "video"
+  let screenStream = null;
+  let screenShareAudioNode = null;
+  let videoFileAudioNode = null;
+  let currentVideoFileUrl = null;
+  let currentVideoFileName = "Video";
+  const supportsDisplayMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  if (!supportsDisplayMedia && screenShareBtn) {
+    screenShareBtn.disabled = true;
+    screenShareBtn.title = "Screen share isn't supported in this browser";
+  }
+
+  function updateSourceButtons() {
+    cameraSourceBtn.classList.toggle("active", activeMainSource === "camera");
+    screenShareBtn.classList.toggle("active", activeMainSource === "screen");
+    videoFileBtn.classList.toggle("active", activeMainSource === "video");
+    screenShareBtn.textContent = activeMainSource === "screen" ? "Stop screen share" : "Share screen";
+    videoFileBtn.textContent = activeMainSource === "video" ? "Stop video" : "Play video file";
+  }
+
+  // Lazily brings up the camera/mic + canvas capture + audio mix graph the
+  // first time ANY source control is used, not just "Go live" -- a host
+  // should be able to set up screen share or cue a video file before going
+  // live, same as picking a filter already works pre-broadcast.
+  async function ensureMediaReady() {
+    if (hostStream) return;
+    await initCamera();
+  }
+
+  // getDisplayMedia() captures whatever window/tab/screen the host picks --
+  // including a YouTube tab playing in their own browser. This is the real,
+  // supported way to "cast video" into the broadcast; there is no way to
+  // capture a cross-origin <iframe>'s video directly (browsers block that
+  // entirely), so screen share is the actual mechanism for that use case.
+  async function startScreenShare() {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      stopVideoFilePlayback(); // sources are mutually exclusive for tile 0
+      screenStream = stream;
+      screenSharePreview.srcObject = stream;
+      activeMainSource = "screen";
+      updateSourceButtons();
+
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length) {
+        screenShareAudioNode = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+        screenShareAudioNode.connect(mixDestination);
+      }
+
+      // Browser's native "Stop sharing" UI ends the video track directly --
+      // this is the only reliable signal that happened, so fall back to the
+      // camera from here rather than leaving the canvas drawing a dead tile.
+      stream.getVideoTracks()[0].onended = () => stopScreenShare();
+    } catch (err) {
+      // NotAllowedError/AbortError = the host just dismissed the picker; not
+      // worth alarming them with an error dialog for that.
+      if (err && err.name !== "NotAllowedError" && err.name !== "AbortError") {
+        alert("Couldn't start screen share: " + err.message);
+      }
+    }
+  }
+
+  function stopScreenShare() {
+    if (screenStream) {
+      screenStream.getTracks().forEach((t) => t.stop());
+      screenStream = null;
+    }
+    screenSharePreview.srcObject = null;
+    if (screenShareAudioNode) {
+      try { screenShareAudioNode.disconnect(); } catch (e) { /* already disconnected */ }
+      screenShareAudioNode = null;
+    }
+    if (activeMainSource === "screen") {
+      activeMainSource = "camera";
+      updateSourceButtons();
+    }
+  }
+
+  // Plays a host-picked local video file into the broadcast. The visual side
+  // reuses the exact same drawImage/drawCover path the camera tiles already
+  // use (see getMainTile() + drawLoop below) rather than captureStream'ing
+  // the whole element -- matching how this file already draws every other
+  // video source onto the canvas. captureStream() IS used, narrowly, just to
+  // get a tappable MediaStream for the file's AUDIO track, mixed into
+  // mixDestination the same non-destructive way guest audio already is
+  // (see approveGuest() above) -- unlike Web Audio's MediaElementSourceNode,
+  // this doesn't hijack the <video> element's own output, so it keeps
+  // playing/monitoring normally too.
+  function startVideoFilePlayback(file) {
+    stopScreenShare();
+    if (currentVideoFileUrl) URL.revokeObjectURL(currentVideoFileUrl);
+    currentVideoFileUrl = URL.createObjectURL(file);
+    currentVideoFileName = file.name.replace(/\.[^./]+$/, "") || "Video";
+    videoFilePlayer.src = currentVideoFileUrl;
+    videoFilePlayer.currentTime = 0;
+    videoFilePlayer.play().then(() => {
+      activeMainSource = "video";
+      updateSourceButtons();
+      try {
+        const captured = videoFilePlayer.captureStream
+          ? videoFilePlayer.captureStream()
+          : videoFilePlayer.mozCaptureStream();
+        const audioTracks = captured.getAudioTracks();
+        if (audioTracks.length) {
+          videoFileAudioNode = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+          videoFileAudioNode.connect(mixDestination);
+        }
+      } catch (e) {
+        // captureStream() unsupported on this browser -- the file still
+        // plays visually in the broadcast, just without its own audio track.
+      }
+    }).catch((err) => {
+      alert("Couldn't play that video file: " + err.message);
+      stopVideoFilePlayback();
+    });
+  }
+
+  // Video ending on its own (reached the end) needs the exact same cleanup
+  // as the host manually stopping it -- requirement is "don't leave the
+  // broadcast frozen," so always fall back to camera here too.
+  videoFilePlayer.addEventListener("ended", () => stopVideoFilePlayback());
+
+  function stopVideoFilePlayback() {
+    videoFilePlayer.pause();
+    videoFilePlayer.removeAttribute("src");
+    videoFilePlayer.load();
+    if (currentVideoFileUrl) {
+      URL.revokeObjectURL(currentVideoFileUrl);
+      currentVideoFileUrl = null;
+    }
+    if (videoFileAudioNode) {
+      try { videoFileAudioNode.disconnect(); } catch (e) { /* already disconnected */ }
+      videoFileAudioNode = null;
+    }
+    if (activeMainSource === "video") {
+      activeMainSource = "camera";
+      updateSourceButtons();
+    }
+  }
+
+  cameraSourceBtn.onclick = async () => {
+    await ensureMediaReady();
+    stopScreenShare();
+    stopVideoFilePlayback();
+    activeMainSource = "camera";
+    updateSourceButtons();
+  };
+
+  screenShareBtn.onclick = async () => {
+    if (activeMainSource === "screen") { stopScreenShare(); return; }
+    await ensureMediaReady();
+    startScreenShare();
+  };
+
+  videoFileBtn.onclick = async () => {
+    if (activeMainSource === "video") { stopVideoFilePlayback(); return; }
+    await ensureMediaReady();
+    videoFileInput.click();
+  };
+
+  videoFileInput.onchange = async () => {
+    const file = videoFileInput.files[0];
+    videoFileInput.value = "";
+    if (!file) return;
+    await ensureMediaReady();
+    startVideoFilePlayback(file);
+  };
+
+  // Which element supplies tile 0 right now. Guests still tile on top
+  // regardless of which of these is active -- drawLoop pushes this as the
+  // first tile, then appends guestConnections exactly as it always did.
+  function getMainTile() {
+    if (activeMainSource === "screen" && screenSharePreview.srcObject) {
+      return { el: screenSharePreview, name: "Screen share" };
+    }
+    if (activeMainSource === "video" && videoFilePlayer.src) {
+      return { el: videoFilePlayer, name: currentVideoFileName };
+    }
+    return { el: selfPreview, name: window.HOST_NAME || "Host" };
+  }
+
+  updateSourceButtons();
+
   // "Cover"-style draw (like CSS object-fit: cover): fills the target cell
   // without squishing the source video's aspect ratio, cropping instead.
   function drawCover(videoEl, x, y, w, h) {
@@ -209,9 +426,10 @@
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Tile 0 is always the host. Every connected guest adds another tile —
-    // the grid reflows live as people join or leave, no fixed layout.
-    const tiles = [{ el: selfPreview, name: window.HOST_NAME || "Host" }];
+    // Tile 0 is whichever main source is active (camera / screen share /
+    // video file). Every connected guest adds another tile — the grid
+    // reflows live as people join or leave, no fixed layout.
+    const tiles = [getMainTile()];
     guestConnections.forEach((g) => tiles.push({ el: g.video, name: g.name || "Guest" }));
 
     const total = tiles.length;
@@ -534,9 +752,19 @@
       goLiveBtn.style.display = "none";
       endLiveBtn.disabled = false;
 
+      // Each ~1s chunk is uploaded to the server as it's produced (see
+      // backend's /upload-chunk for why) instead of being buffered here
+      // until "end live" -- a chunk queue + sequential uploader keeps
+      // chunks in order on the server even though MediaRecorder can fire
+      // ondataavailable faster than any one upload completes.
       recordedChunks = [];
+      chunkUploadQueue = Promise.resolve();
       mediaRecorder = new MediaRecorder(finalStream, { mimeType: "video/webm;codecs=vp8,opus" });
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size === 0) return;
+        recordedChunks.push(e.data); // local fallback only, see endLiveBtn.onclick
+        chunkUploadQueue = chunkUploadQueue.then(() => uploadChunk(e.data));
+      };
       mediaRecorder.start(1000);
     } catch (err) {
       alert("Couldn't access camera/microphone: " + err.message);
@@ -557,6 +785,8 @@
     Array.from(guestConnections.keys()).forEach(removeGuest);
     Array.from(pendingGuests.keys()).forEach(declineGuest);
     camRequestsBox.innerHTML = "";
+    stopScreenShare();
+    stopVideoFilePlayback();
 
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
       await new Promise((resolve) => {
@@ -565,14 +795,20 @@
       });
     }
     if (recordedChunks.length) {
-      const blob = new Blob(recordedChunks, { type: "video/webm" });
-      const formData = new FormData();
-      formData.append("recording", blob, "recording.webm");
-      try {
-        await fetch(`/live/${ROOM}/upload-recording`, { method: "POST", body: formData });
-        endLiveBtn.textContent = "Saved";
-      } catch (e) {
-        endLiveBtn.textContent = "Save failed";
+      endLiveBtn.textContent = "Saving…";
+      // Wait for every queued chunk upload (including retries) to finish --
+      // most of the recording is on disk already from during the broadcast,
+      // this just waits for the tail end and then tells the server to stitch
+      // the chunks into the final file.
+      await chunkUploadQueue;
+      const finalizeRes = await fetch(`/live/${ROOM}/finalize-recording`, { method: "POST" }).catch(() => null);
+      const finalizeData = finalizeRes ? await finalizeRes.json().catch(() => ({})) : {};
+      if (finalizeRes && finalizeRes.ok) {
+        endLiveBtn.textContent = chunkUploadFailures > 0
+          ? `Saved (${chunkUploadFailures} chunk${chunkUploadFailures === 1 ? "" : "s"} dropped)`
+          : "Saved";
+      } else {
+        endLiveBtn.textContent = "Save failed: " + (finalizeData.error || "unknown error");
       }
     } else {
       endLiveBtn.textContent = "Ended";
