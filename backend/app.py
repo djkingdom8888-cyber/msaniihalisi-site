@@ -921,6 +921,52 @@ def upload_track():
     return jsonify({"ok": True, "id": new_id, "title": title, "artist": artist, "artwork": artwork_path})
 
 
+# Site assets (e.g. the homepage hero background loop) are referenced by a fixed
+# filename directly in index.html markup -- they are not catalog items, so they
+# don't belong in the tracks table the way /api/tracks/upload's videos do (that
+# endpoint always inserts a track row, and delete_track() deletes the underlying
+# file once its row is gone -- both wrong for an asset the homepage always expects
+# to find at a stable path). This writes straight to VIDEOS_DIR under a fixed,
+# allow-listed filename instead, reusing the same on-disk location (the Render
+# persistent disk mounted at DATA_DIR) as every other upload endpoint.
+ALLOWED_SITE_ASSET_NAMES = {"hero-loop.mov", "hero-loop.mp4", "hero-loop.webm"}
+
+
+@app.post("/api/admin/site-asset")
+@login_required
+def upload_site_asset():
+    """Admin-only: place a fixed-name video asset (e.g. the hero background loop)
+    directly on the persistent disk at videos/<name>, overwriting any existing file
+    of that name. Field 'video' is the file; field 'name' must be one of
+    ALLOWED_SITE_ASSET_NAMES and match the path index.html actually references."""
+    name = (request.form.get("name") or "").strip()
+    if name not in ALLOWED_SITE_ASSET_NAMES:
+        return jsonify({"error": f"name must be one of: {', '.join(sorted(ALLOWED_SITE_ASSET_NAMES))}"}), 400
+
+    video_file = request.files.get("video")
+    if not video_file or not video_file.filename:
+        return jsonify({"error": "No video file uploaded."}), 400
+    ext = video_file.filename.rsplit(".", 1)[-1].lower() if "." in video_file.filename else ""
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        return jsonify({"error": f"Unsupported file type .{ext}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}"}), 400
+    if not name.endswith(f".{ext}"):
+        return jsonify({"error": f"name '{name}' doesn't match uploaded file extension .{ext}"}), 400
+
+    dest = VIDEOS_DIR / name
+    tmp_dest = VIDEOS_DIR / f".{name}.uploading"
+    try:
+        video_file.save(tmp_dest)
+        tmp_dest.replace(dest)
+    except OSError:
+        tmp_dest.unlink(missing_ok=True)
+        return jsonify({
+            "error": "Upload failed: the server ran out of storage space. "
+                     "An admin needs to free up disk space (delete old videos) or increase the disk size."
+        }), 507
+
+    return jsonify({"ok": True, "name": name, "bytes": dest.stat().st_size})
+
+
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({"error": "That file is too large (300MB limit)."}), 413
