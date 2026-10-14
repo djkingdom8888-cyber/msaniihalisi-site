@@ -130,14 +130,22 @@
     background:var(--ink);
     display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden;
   }
-  /* Video-intro hero (item 3): a real <video> fills this pane once a loop file
-     exists at videos/hero-loop.mp4; until then .hero-visual-fallback (the original
-     word-mark art) stays visible so there's no broken/empty media placeholder. */
+  /* Video-intro hero (item 3): videos/hero-loop.mov (509 OpenMic Cipher) fills this
+     pane; .hero-visual-fallback (the original word-mark art) only shows if the
+     <source> ever fails to load, so there's no broken/empty media placeholder. */
   .hero-video{
     display:none; position:absolute; inset:0; width:100%; height:100%;
     object-fit:cover; z-index:0;
   }
   .hero-video.has-source{display:block;}
+  .hero-video-sound{
+    display:none; position:absolute; bottom:18px; right:18px; z-index:2;
+    width:38px; height:38px; border-radius:50%; border:1px solid var(--brass);
+    background:rgba(23,17,11,0.65); color:var(--bone); font-size:16px;
+    align-items:center; justify-content:center; cursor:pointer; transition:0.2s;
+  }
+  .hero-video-sound:hover{background:var(--brass);}
+  .hero-video.has-source ~ .hero-video-sound{display:flex;}
   .hero-visual-fallback{
     position:relative; width:100%; height:100%;
     display:flex; align-items:center; justify-content:center;
@@ -676,17 +684,17 @@
     </div>
     <div class="hero-visual" id="heroVisual">
       <!--
-        VIDEO HERO PLACEHOLDER (item 3 — flagged for the site owner):
-        No real hero loop file has been supplied yet, so this intentionally has no
-        <source>, to avoid pointing at a video that doesn't exist. To go live:
-          1. Drop a looping video file at msaniihalisi/videos/hero-loop.mp4
-             (and optionally hero-loop.webm for broader browser support).
-          2. Add a <source> tag inside #heroVideo below, e.g.
-             <source src="videos/hero-loop.mp4" type="video/mp4">
-          3. Reload — the JS at the bottom of this file detects the source and
-             swaps the placeholder art below for the real video automatically.
+        VIDEO HERO (item 3): hero-loop.mov is the 509 OpenMic Cipher clip, served
+        directly from videos/ the same way other .mov uploads in this folder are
+        played (no transcode step in this project — HEVC .mov files already load
+        fine via <video>/<source> without a type hint). The JS at the bottom of
+        this file detects the <source> below and swaps the fallback word-mark art
+        out for the real video automatically.
       -->
-      <video id="heroVideo" class="hero-video" muted loop playsinline autoplay aria-hidden="true"></video>
+      <video id="heroVideo" class="hero-video" muted loop playsinline autoplay aria-hidden="true">
+        <source src="videos/hero-loop.mov">
+      </video>
+      <button id="heroVideoSound" class="hero-video-sound" type="button" aria-label="Turn on video sound" aria-pressed="false">🔇</button>
       <div class="hero-visual-fallback" id="heroVisualFallback">
         <div class="grain" aria-hidden="true"></div>
         <div class="word">
@@ -694,7 +702,6 @@
           <span class="line-big red">Halisi.</span>
         </div>
         <span class="tag">Galveston, TX</span>
-        <span class="video-placeholder-note">🎬 Video hero placeholder — this pane is ready for a real looping video. Drop the file at <code>videos/hero-loop.mp4</code> and add its &lt;source&gt; tag to go live.</span>
       </div>
     </div>
   </section>
@@ -1906,8 +1913,20 @@
   // comment in the HTML), show the video and hide the word-mark placeholder art.
   // Left as a no-op — no console errors — until a real file is supplied.
   const heroVideoEl = document.getElementById('heroVideo');
+  const heroSoundBtn = document.getElementById('heroVideoSound');
   if (heroVideoEl.querySelector('source')) {
     heroVideoEl.classList.add('has-source');
+  }
+  const HERO_VIDEO_VOLUME = 0.18;
+  if (heroSoundBtn) {
+    heroSoundBtn.addEventListener('click', () => {
+      const turningOn = heroVideoEl.muted;
+      heroVideoEl.muted = !turningOn;
+      heroVideoEl.volume = HERO_VIDEO_VOLUME;
+      heroSoundBtn.setAttribute('aria-pressed', String(turningOn));
+      heroSoundBtn.textContent = turningOn ? '🔊' : '🔇';
+      heroSoundBtn.setAttribute('aria-label', turningOn ? 'Turn off video sound' : 'Turn on video sound');
+    });
   }
 
   // ---------------- Scrolling announcement strip (item 4) ----------------
