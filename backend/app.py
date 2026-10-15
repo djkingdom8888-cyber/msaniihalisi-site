@@ -986,6 +986,57 @@ def upload_site_asset():
     return jsonify({"ok": True, "name": name, "bytes": dest.stat().st_size})
 
 
+# Give the homepage hero background video weekly rotation through the same
+# catalog of uploaded videos /api/tracks already serves (DJ Kingdom Refix,
+# NILE, Maajab, Amalaki, Kalkouta, Roke, etc.), instead of depending solely on
+# the fixed hero-loop.mov manual-upload slot above -- that file doesn't exist
+# on production yet (404s) and even once uploaded would otherwise sit in the
+# hero slot indefinitely while the rest of the catalog gets no exposure there.
+# Same stateless wall-clock-time-bucket approach as TRACK_ROTATION_PERIOD_SECONDS
+# above, but its own independent period/offset -- this rotates which single
+# video fills the hero background, not the display order of the full catalog
+# list, so it deliberately does not reuse that computed offset.
+HERO_ROTATION_PERIOD_SECONDS = 7 * 24 * 3600  # rotate the hero video once a week
+
+
+def select_hero_video(rows):
+    """rows: active type='video' tracks with a real on-disk src, ordered by
+    sort_order ASC (the same stable base sequence build_rotated_tracks uses).
+    Deterministically picks one based on the current wall-clock week bucket --
+    same value for every visitor at a given moment, no DB writes, no cron."""
+    items = [dict(r) for r in rows]
+    n = len(items)
+    if n == 0:
+        return None
+    offset = int(time.time() // HERO_ROTATION_PERIOD_SECONDS) % n
+    return items[offset]
+
+
+@app.get("/api/hero-video")
+def hero_video():
+    """Public: which video should currently fill the homepage hero background.
+    Prefers a manually-uploaded override at videos/hero-loop.(mov|mp4|webm) --
+    placed via the admin "UPLOAD HERO VIDEO" control / /api/admin/site-asset,
+    unchanged by this endpoint -- if an admin has placed one; otherwise falls
+    back to the weekly-rotating catalog pick above, so the hero slot always has
+    a real video to show instead of 404ing on a file nobody uploaded."""
+    for name in ("hero-loop.mov", "hero-loop.mp4", "hero-loop.webm"):
+        if (VIDEOS_DIR / name).exists():
+            return jsonify({"src": f"videos/{name}", "source": "override"})
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, title, src FROM tracks "
+        "WHERE active = 1 AND type = 'video' AND src IS NOT NULL AND src != '' "
+        "ORDER BY sort_order ASC"
+    ).fetchall()
+    conn.close()
+    choice = select_hero_video(rows)
+    if not choice:
+        return jsonify({"src": None})
+    return jsonify({"src": choice["src"], "title": choice["title"], "source": "rotation"})
+
+
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({"error": "That file is too large (300MB limit)."}), 413

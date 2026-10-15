@@ -684,16 +684,20 @@
     </div>
     <div class="hero-visual" id="heroVisual">
       <!--
-        VIDEO HERO (item 3): hero-loop.mov is the 509 OpenMic Cipher clip, served
-        directly from videos/ the same way other .mov uploads in this folder are
-        played (no transcode step in this project — HEVC .mov files already load
-        fine via <video>/<source> without a type hint). The JS at the bottom of
-        this file detects the <source> below and swaps the fallback word-mark art
-        out for the real video automatically.
+        VIDEO HERO (item 3): no hardcoded <source> here anymore. On load, the JS
+        at the bottom of this file fetches GET /api/hero-video, which returns an
+        admin-uploaded hero-loop.(mov|mp4|webm) override if one exists (see the
+        "UPLOAD HERO VIDEO" admin control / /api/admin/site-asset below), or
+        otherwise the current pick from a weekly rotation through the full
+        Halisi Sound video catalog (same catalog /api/tracks serves — DJ Kingdom
+        Refix, NILE, Maajab, Amalaki, etc.) so every video gets time in the hero
+        slot instead of the page depending on one fixed file that may not exist.
+        The JS adds a real <source> once it has a path (no transcode step needed
+        — HEVC .mov files already load fine via <video>/<source> without a type
+        hint), which is what flips the fallback word-mark art off in favor of
+        the video.
       -->
-      <video id="heroVideo" class="hero-video" muted loop playsinline autoplay aria-hidden="true">
-        <source src="videos/hero-loop.mov">
-      </video>
+      <video id="heroVideo" class="hero-video" muted loop playsinline autoplay aria-hidden="true"></video>
       <button id="heroVideoSound" class="hero-video-sound" type="button" aria-label="Turn on video sound" aria-pressed="false">🔇</button>
       <div class="hero-visual-fallback" id="heroVisualFallback">
         <div class="grain" aria-hidden="true"></div>
@@ -855,7 +859,13 @@
             <button id="uploadBtn" class="btn btn-red" type="button">UPLOAD</button>
           </div>
           <div class="upload-add" id="heroAssetUpload">
-            <div class="upload-or" style="margin-top:0;">— admin: homepage hero video —</div>
+            <div class="upload-or" style="margin-top:0;">— admin: homepage hero video override (optional) —</div>
+            <div style="font-size:11px; color:#B3A186; margin:-4px 0 8px;">
+              By default the hero background rotates weekly through the full video
+              catalog above. Upload a file here only if you want to pin one fixed
+              video in that spot instead — it'll take priority over the rotation
+              until it's removed from the server.
+            </div>
             <label class="upload-file-label">
               <input type="file" id="heroVideoFile" accept="video/mp4,video/quicktime,video/webm">
               <span id="heroVideoFileName">Choose hero-loop video file…</span>
@@ -1962,14 +1972,29 @@
   });
 
   // ---------------- Video hero (item 3) ----------------
-  // If a real <source> has been added inside #heroVideo (see the placeholder
-  // comment in the HTML), show the video and hide the word-mark placeholder art.
-  // Left as a no-op — no console errors — until a real file is supplied.
+  // Ask the backend which video should fill the hero background right now —
+  // either an admin-uploaded hero-loop override, or the current pick from the
+  // weekly rotation through the full video catalog (see GET /api/hero-video).
+  // Only once a real <source> is attached does .has-source flip on, hiding the
+  // word-mark placeholder art — so a network hiccup just leaves the fallback
+  // art showing instead of a broken/empty video.
   const heroVideoEl = document.getElementById('heroVideo');
   const heroSoundBtn = document.getElementById('heroVideoSound');
-  if (heroVideoEl.querySelector('source')) {
-    heroVideoEl.classList.add('has-source');
-  }
+  (async () => {
+    try {
+      const res = await fetch('/api/hero-video');
+      const data = await res.json().catch(() => ({}));
+      if (!data || !data.src) return;
+      const source = document.createElement('source');
+      source.src = data.src;
+      heroVideoEl.appendChild(source);
+      heroVideoEl.classList.add('has-source');
+      heroVideoEl.load();
+      heroVideoEl.play().catch(() => {});
+    } catch (err) {
+      // Fallback art stays up — no console error spam over a missing hero video.
+    }
+  })();
   const HERO_VIDEO_VOLUME = 0.18;
   if (heroSoundBtn) {
     heroSoundBtn.addEventListener('click', () => {
