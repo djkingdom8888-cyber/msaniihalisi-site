@@ -679,12 +679,31 @@ def me():
     return jsonify({"loggedIn": False})
 
 
+# Give every active track/video fair rotation in the featured/top slot instead
+# of always leading with whatever has the lowest sort_order. Deterministic and
+# stateless -- the offset is derived purely from wall-clock time, so it's the
+# same for every visitor at a given moment and doesn't rely on a cron job,
+# background worker, or any persisted state that a Render restart could reset
+# or desync. sort_order still defines the stable base sequence; this only
+# rotates *presentation* order (list is cyclically shifted, not shuffled).
+TRACK_ROTATION_PERIOD_SECONDS = 25 * 3600  # rotate once every 25 hours
+
+
+def build_rotated_tracks(rows):
+    items = [dict(r) for r in rows]
+    n = len(items)
+    if n == 0:
+        return items
+    offset = int(time.time() // TRACK_ROTATION_PERIOD_SECONDS) % n
+    return items[offset:] + items[:offset]
+
+
 @app.get("/api/tracks")
 def list_tracks():
     conn = get_db()
     rows = conn.execute("SELECT * FROM tracks WHERE active = 1 ORDER BY sort_order ASC").fetchall()
     conn.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(build_rotated_tracks(rows))
 
 
 @app.delete("/api/tracks/<track_id>")
