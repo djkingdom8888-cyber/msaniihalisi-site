@@ -854,6 +854,15 @@
             </label>
             <button id="uploadBtn" class="btn btn-red" type="button">UPLOAD</button>
           </div>
+          <div class="upload-add" id="heroAssetUpload">
+            <div class="upload-or" style="margin-top:0;">— admin: homepage hero video —</div>
+            <label class="upload-file-label">
+              <input type="file" id="heroVideoFile" accept="video/mp4,video/quicktime,video/webm">
+              <span id="heroVideoFileName">Choose hero-loop video file…</span>
+            </label>
+            <button id="heroVideoUploadBtn" class="btn btn-red" type="button">UPLOAD HERO VIDEO</button>
+            <div id="heroVideoStatus" style="font-size:11px; color:#B3A186; min-height:14px;"></div>
+          </div>
           <ul class="player-list" id="playerList"></ul>
           <audio id="mainAudio" preload="auto"></audio>
         </div>
@@ -1018,6 +1027,12 @@
   const uploadArtist = document.getElementById('uploadArtist');
   const uploadBtn    = document.getElementById('uploadBtn');
   const trackArtworkImg = document.getElementById('trackArtworkImg');
+
+  const heroAssetUpload = document.getElementById('heroAssetUpload');
+  const heroVideoFile = document.getElementById('heroVideoFile');
+  const heroVideoFileName = document.getElementById('heroVideoFileName');
+  const heroVideoUploadBtn = document.getElementById('heroVideoUploadBtn');
+  const heroVideoStatus = document.getElementById('heroVideoStatus');
 
   const albumsAdminPanel = document.getElementById('albumsAdminPanel');
   const albumTitle = document.getElementById('albumTitle');
@@ -1399,6 +1414,43 @@
     loadTrack(playlist.length - 1);
   }
   uploadBtn.addEventListener('click', uploadVideo);
+
+  heroVideoFile.addEventListener('change', () => {
+    heroVideoFileName.textContent = heroVideoFile.files[0] ? heroVideoFile.files[0].name : 'Choose hero-loop video file…';
+  });
+
+  const HERO_ASSET_NAMES = { mp4: 'hero-loop.mp4', mov: 'hero-loop.mov', webm: 'hero-loop.webm' };
+
+  async function uploadHeroVideo(){
+    if (!isAdmin) { alert('Log in as admin to upload the hero video.'); return; }
+    const file = heroVideoFile.files[0];
+    if (!file) { heroVideoStatus.textContent = 'Choose a video file first.'; return; }
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const name = HERO_ASSET_NAMES[ext];
+    if (!name) { heroVideoStatus.textContent = 'Unsupported file type — use .mp4, .mov, or .webm.'; return; }
+    const original = heroVideoUploadBtn.textContent;
+    heroVideoUploadBtn.textContent = 'UPLOADING…'; heroVideoUploadBtn.disabled = true;
+    heroVideoStatus.textContent = 'Uploading…';
+    const form = new FormData();
+    form.append('name', name);
+    form.append('video', file);
+    let res, data;
+    try {
+      res = await fetch('/api/admin/site-asset', { method: 'POST', body: form });
+      data = await res.json().catch(() => ({}));
+    } catch (e) {
+      heroVideoUploadBtn.textContent = original; heroVideoUploadBtn.disabled = false;
+      heroVideoStatus.textContent = 'Upload failed — network error.';
+      return;
+    }
+    heroVideoUploadBtn.textContent = original; heroVideoUploadBtn.disabled = false;
+    if (res.status === 401) { alert('Your session expired — please log in again.'); setAdminMode(false); return; }
+    if (!res.ok) { heroVideoStatus.textContent = data.error || 'Upload failed — try again.'; return; }
+    const mb = (data.bytes / (1024 * 1024)).toFixed(1);
+    heroVideoStatus.textContent = `Uploaded ${data.name} (${mb}MB).`;
+    heroVideoFile.value = ''; heroVideoFileName.textContent = 'Choose hero-loop video file…';
+  }
+  heroVideoUploadBtn.addEventListener('click', uploadHeroVideo);
 
   async function loadTracksFromServer(){
     const res = await fetch('/api/tracks');
@@ -1850,6 +1902,7 @@
     shopSection.classList.toggle('admin-mode', on);
     apparelGroups.classList.toggle('admin-mode', on);
     uploadAdd.classList.toggle('show', on);
+    heroAssetUpload.classList.toggle('show', on);
     albumsAdminPanel.classList.toggle('show', on);
     analyticsLink.style.display = on ? 'inline-block' : 'none';
     adminToggles.forEach(btn => {
