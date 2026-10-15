@@ -1071,14 +1071,20 @@ def select_hero_video(rows):
     return items[offset]
 
 
+PINNED_HERO_TRACK_TITLE = "509 OpenMic Cipher"
+
+
 @app.get("/api/hero-video")
 def hero_video():
     """Public: which video should currently fill the homepage hero background.
     Prefers a manually-uploaded override at videos/hero-loop.(mov|mp4|webm) --
-    placed via the admin "UPLOAD HERO VIDEO" control / /api/admin/site-asset,
-    unchanged by this endpoint -- if an admin has placed one; otherwise falls
-    back to the weekly-rotating catalog pick above, so the hero slot always has
-    a real video to show instead of 404ing on a file nobody uploaded."""
+    placed via the admin "UPLOAD HERO VIDEO" control / /api/admin/site-asset --
+    if an admin has placed one; then a direct pin by catalog track title
+    (PINNED_HERO_TRACK_TITLE, set when the owner explicitly wants a specific
+    already-uploaded catalog video locked in regardless of the rotation); then
+    falls back to the weekly-rotating catalog pick above, so the hero slot
+    always has a real video to show instead of 404ing on a file nobody
+    uploaded."""
     for name in ("hero-loop.mov", "hero-loop.mp4", "hero-loop.webm"):
         if (VIDEOS_DIR / name).exists():
             return jsonify({"src": f"videos/{name}", "source": "override"})
@@ -1089,6 +1095,13 @@ def hero_video():
         "WHERE active = 1 AND type = 'video' AND src IS NOT NULL AND src != '' "
         "ORDER BY sort_order ASC"
     ).fetchall()
+
+    if PINNED_HERO_TRACK_TITLE:
+        for row in rows:
+            if row["title"] == PINNED_HERO_TRACK_TITLE:
+                conn.close()
+                return jsonify({"src": row["src"], "title": row["title"], "source": "pinned"})
+
     conn.close()
     choice = select_hero_video(rows)
     if not choice:
