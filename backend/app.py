@@ -347,6 +347,8 @@ def init_db():
             browser TEXT,
             referrer TEXT,
             visitor_id TEXT,
+            user_agent TEXT,
+            is_bot INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_page_views_created_at ON page_views(created_at);
@@ -423,6 +425,21 @@ def init_db():
     existing_track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
     if "artwork" not in existing_track_cols:
         conn.execute("ALTER TABLE tracks ADD COLUMN artwork TEXT")
+        conn.commit()
+
+    # Safe idempotent migration: page_views predates bot/crawler filtering, so
+    # existing databases need these columns added rather than recreated.
+    # user_agent is stored raw going forward so rows can always be
+    # reclassified later without another migration; is_bot is computed at
+    # insert time from is_bot_user_agent(). Historical rows (before this
+    # migration ran) have no stored User-Agent to reclassify from, so they
+    # stay is_bot=0 (unclassified, best-effort) -- see log_page_view().
+    existing_pv_cols = {row["name"] for row in conn.execute("PRAGMA table_info(page_views)").fetchall()}
+    if "user_agent" not in existing_pv_cols:
+        conn.execute("ALTER TABLE page_views ADD COLUMN user_agent TEXT")
+        conn.commit()
+    if "is_bot" not in existing_pv_cols:
+        conn.execute("ALTER TABLE page_views ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0] == 0:
@@ -570,6 +587,46 @@ def parse_user_agent(ua):
     return device_type, browser
 
 
+# Known bot/crawler/monitoring/script User-Agent substrings, lowercase. This is
+# intentionally UA-string-only (no IP/ASN lookup, no paid service) -- low
+# maintenance, good enough to strip the overwhelming majority of non-human
+# traffic (search crawlers, SEO bots, social link-preview fetchers, uptime
+# monitors, and bare HTTP-client libraries) out of the analytics dashboard.
+# Not meant to catch every sophisticated scraper that spoofs a real browser UA.
+_BOT_UA_SUBSTRINGS = (
+    # Search engine crawlers
+    "googlebot", "bingbot", "duckduckbot", "baiduspider", "yandexbot",
+    "slurp", "sogou", "exabot", "applebot", "ia_archiver",
+    # SEO / marketing crawlers
+    "ahrefsbot", "semrushbot", "mj12bot", "dotbot", "rogerbot", "blexbot",
+    "seznambot", "dataforseobot",
+    # Social link-preview bots
+    "facebookexternalhit", "twitterbot", "slackbot", "discordbot",
+    "whatsapp", "telegrambot", "linkedinbot", "pinterest", "redditbot",
+    "skypeuripreview",
+    # Uptime / monitoring services
+    "uptimerobot", "pingdom", "statuscake", "better uptime", "betteruptime",
+    "site24x7", "newrelicpinger", "datadog",
+    # Generic script / HTTP-client libraries
+    "python-requests", "python-urllib", "curl/", "wget/", "go-http-client",
+    "axios/", "node-fetch", "scrapy", "java/", "okhttp", "apache-httpclient",
+    "postmanruntime", "libwww-perl", "httpclient",
+)
+
+
+def is_bot_user_agent(ua):
+    """True if this User-Agent is a known crawler/monitor/script, or missing
+    entirely (real browsers always send one; many simple scripts don't)."""
+    ua_l = (ua or "").strip().lower()
+    if not ua_l:
+        return True
+    if any(tok in ua_l for tok in _BOT_UA_SUBSTRINGS):
+        return True
+    # Catch-all for anything self-identifying as a bot that isn't explicitly
+    # listed above.
+    return any(tok in ua_l for tok in ("bot", "spider", "crawler", "crawl"))
+
+
 @app.before_request
 def _assign_visitor_id():
     existing = request.cookies.get("mh_visitor")
@@ -593,13 +650,15 @@ def log_page_view(path):
     endpoints, static assets, or the analytics endpoints themselves."""
     ip = get_client_ip()
     country, city = get_geo(ip)
-    device_type, browser = parse_user_agent(request.headers.get("User-Agent", ""))
+    ua = request.headers.get("User-Agent", "")
+    device_type, browser = parse_user_agent(ua)
+    is_bot = 1 if is_bot_user_agent(ua) else 0
     referrer = (request.headers.get("Referer", "") or "")[:500]
     conn = get_db()
     conn.execute(
-        """INSERT INTO page_views (path, ip_address, country, city, device_type, browser, referrer, visitor_id)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (path, ip, country, city, device_type, browser, referrer, g.visitor_id),
+        """INSERT INTO page_views (path, ip_address, country, city, device_type, browser, referrer, visitor_id, user_agent, is_bot)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (path, ip, country, city, device_type, browser, referrer, g.visitor_id, ua, is_bot),
     )
     conn.commit()
     conn.close()
@@ -2209,9 +2268,9 @@ def order_ship(order_id):
 
 def _visit_totals(conn, since_expr=None):
     if since_expr is None:
-        where, params = "1=1", ()
+        where, params = "is_bot = 0", ()
     else:
-        where, params = "created_at >= datetime('now', ?)", (since_expr,)
+        where, params = "is_bot = 0 AND created_at >= datetime('now', ?)", (since_expr,)
     visits = conn.execute(f"SELECT COUNT(*) FROM page_views WHERE {where}", params).fetchone()[0]
     uniques = conn.execute(
         f"SELECT COUNT(DISTINCT visitor_id) FROM page_views WHERE {where}", params
@@ -2231,12 +2290,12 @@ def build_analytics_summary():
     locations = [
         dict(r) for r in conn.execute(
             """SELECT country, city, COUNT(*) AS visits, COUNT(DISTINCT visitor_id) AS unique_visitors
-               FROM page_views GROUP BY country, city ORDER BY visits DESC LIMIT 15"""
+               FROM page_views WHERE is_bot = 0 GROUP BY country, city ORDER BY visits DESC LIMIT 15"""
         ).fetchall()
     ]
 
     device_rows = conn.execute(
-        "SELECT device_type, COUNT(*) AS c FROM page_views GROUP BY device_type"
+        "SELECT device_type, COUNT(*) AS c FROM page_views WHERE is_bot = 0 GROUP BY device_type"
     ).fetchall()
     device_total = sum(r["c"] for r in device_rows) or 1
     devices = {
@@ -2247,14 +2306,14 @@ def build_analytics_summary():
     browsers = [
         {"browser": r["browser"] or "Unknown", "count": r["c"], "pct": round(r["c"] / device_total * 100, 1)}
         for r in conn.execute(
-            "SELECT browser, COUNT(*) AS c FROM page_views GROUP BY browser ORDER BY c DESC LIMIT 10"
+            "SELECT browser, COUNT(*) AS c FROM page_views WHERE is_bot = 0 GROUP BY browser ORDER BY c DESC LIMIT 10"
         ).fetchall()
     ]
 
     referrers = [
         dict(r) for r in conn.execute(
             """SELECT COALESCE(NULLIF(TRIM(referrer), ''), 'Direct / None') AS referrer, COUNT(*) AS count
-               FROM page_views GROUP BY referrer ORDER BY count DESC LIMIT 10"""
+               FROM page_views WHERE is_bot = 0 GROUP BY referrer ORDER BY count DESC LIMIT 10"""
         ).fetchall()
     ]
 
@@ -2263,7 +2322,7 @@ def build_analytics_summary():
         r["d"]: {"visits": r["visits"], "unique_visitors": r["uniques"]}
         for r in conn.execute(
             """SELECT date(created_at) AS d, COUNT(*) AS visits, COUNT(DISTINCT visitor_id) AS uniques
-               FROM page_views WHERE created_at >= date('now', '-29 days')
+               FROM page_views WHERE is_bot = 0 AND created_at >= date('now', '-29 days')
                GROUP BY d ORDER BY d ASC"""
         ).fetchall()
     }
