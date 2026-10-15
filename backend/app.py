@@ -745,7 +745,7 @@ def me():
 # background worker, or any persisted state that a Render restart could reset
 # or desync. sort_order still defines the stable base sequence; this only
 # rotates *presentation* order (list is cyclically shifted, not shuffled).
-TRACK_ROTATION_PERIOD_SECONDS = 25 * 3600  # rotate once every 25 hours
+TRACK_ROTATION_PERIOD_SECONDS = 24 * 3600  # rotate once every 24 hours
 
 
 def build_rotated_tracks(rows):
