@@ -86,8 +86,9 @@ APPAREL_DIR.mkdir(parents=True, exist_ok=True)
 ALBUMS_DIR = SITE_DIR / "images" / "albums"
 ALBUMS_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif"}
-MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB is plenty for a product photo; keeps this endpoint
-                                    # from doubling as a general-purpose large-file upload.
+MAX_IMAGE_BYTES = 40 * 1024 * 1024  # raised from 8MB -- product photos from modern phone
+                                     # cameras/DSLRs routinely exceed that; still well under
+                                     # the global 300MB request cap (MAX_CONTENT_LENGTH above).
 _EXT_TO_KIND = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp", "gif": "gif"}
 _KIND_TO_MEDIA_TYPE = {
     "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif",
