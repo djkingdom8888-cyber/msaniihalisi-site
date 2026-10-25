@@ -702,6 +702,18 @@ def serve_video(filename):
     return send_from_directory(VIDEOS_DIR, filename)
 
 
+@app.route("/audio/<path:filename>")
+def serve_audio(filename):
+    # Mirrors serve_video above -- without this, uploaded songs (tracks.src under
+    # "audio/...") save fine and get a real duration, but there is no route to
+    # actually serve the bytes back out, so playback 404s. Flask's built-in static
+    # handler (static_folder=SITE_DIR) only covers this by accident when DATA_DIR
+    # happens to equal SITE_DIR; on Render, where DATA_DIR points at the persistent
+    # disk, it does not, so this explicit route (backed by AUDIO_DIR, same pattern
+    # as /videos) is required.
+    return send_from_directory(AUDIO_DIR, filename)
+
+
 @app.post("/api/login")
 def login():
     ip = request.remote_addr or "unknown"
