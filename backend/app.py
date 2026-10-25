@@ -12,6 +12,7 @@ import subprocess
 import time
 import secrets
 import uuid
+import wave
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -878,7 +879,25 @@ def add_track():
     return jsonify({"ok": True, "id": new_id})
 
 
+def _wav_duration_seconds(path):
+    """Reads duration straight from a .wav file's own header (frame count / frame rate)
+    via the stdlib `wave` module -- works identically on macOS and Linux, unlike `mdls`
+    below (which is a macOS-only Spotlight tool and silently returns nothing on Render's
+    Linux host). Returns 0 if the file can't be parsed as a valid WAV."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            return frames / float(rate) if rate else 0
+    except (wave.Error, EOFError, OSError):
+        return 0
+
+
 def _video_duration_seconds(path, attempts=6, delay=0.5):
+    if str(path).lower().endswith(".wav"):
+        seconds = _wav_duration_seconds(path)
+        if seconds:
+            return seconds
     for _ in range(attempts):
         try:
             out = subprocess.run(
