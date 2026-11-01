@@ -759,7 +759,12 @@
       // ondataavailable faster than any one upload completes.
       recordedChunks = [];
       chunkUploadQueue = Promise.resolve();
-      mediaRecorder = new MediaRecorder(finalStream, { mimeType: "video/webm;codecs=vp8,opus" });
+      const vodMimeType = (window.MediaRecorder && MediaRecorder.isTypeSupported)
+        ? ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"].find((c) => MediaRecorder.isTypeSupported(c))
+        : "";
+      mediaRecorder = vodMimeType
+        ? new MediaRecorder(finalStream, { mimeType: vodMimeType })
+        : new MediaRecorder(finalStream);
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size === 0) return;
         recordedChunks.push(e.data); // local fallback only, see endLiveBtn.onclick
